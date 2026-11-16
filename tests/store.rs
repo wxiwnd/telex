@@ -372,3 +372,64 @@ fn session_file_names_do_not_collide_after_sanitizing() {
     assert_ne!(store.token_path("a/b"), store.token_path("a_b"));
     assert_ne!(store.token_path("a/b"), store.token_path("a-b"));
 }
+
+#[test]
+fn sqlite_index_lists_messages_and_rebuilds() {
+    let (_dir, store) = store();
+    let envelope = envelope("worker@local");
+    store
+        .deliver(&envelope, &["worker@local".into()])
+        .expect("deliver");
+
+    assert!(store.index_path().exists());
+    assert_eq!(store.list("worker@local", "new").expect("list").len(), 1);
+
+    std::fs::remove_file(store.index_path()).expect("remove index");
+    assert_eq!(
+        store.list("worker@local", "new").expect("fallback").len(),
+        1
+    );
+
+    let counts = store.index_rebuild().expect("rebuild");
+    assert_eq!(counts["messages"], 2);
+    assert_eq!(counts["indexed"], 2);
+    assert!(store.index_path().exists());
+    assert_eq!(store.list("worker@local", "new").expect("list").len(), 1);
+}
+
+#[test]
+fn corrupt_index_falls_back_to_the_spool() {
+    let (_dir, store) = store();
+    let envelope = envelope("worker@local");
+    store
+        .deliver(&envelope, &["worker@local".into()])
+        .expect("deliver");
+    std::fs::write(store.index_path(), "not sqlite").expect("corrupt index");
+
+    assert_eq!(
+        store.list("worker@local", "new").expect("fallback").len(),
+        1
+    );
+    assert!(!store.index_path().exists());
+}
+
+#[test]
+fn doctor_reports_index_problems() {
+    let (_dir, store) = store();
+    let envelope = envelope("worker@local");
+    store
+        .deliver(&envelope, &["worker@local".into()])
+        .expect("deliver");
+
+    std::fs::remove_file(store.index_path()).expect("remove index");
+    let issues = store.doctor().expect("doctor");
+    assert!(issues.iter().any(|issue| issue.code == "index_missing"));
+
+    store.index_rebuild().expect("rebuild");
+    let issues = store.doctor().expect("doctor");
+    assert!(!issues.iter().any(|issue| issue.code.starts_with("index_")));
+
+    std::fs::write(store.index_path(), "not sqlite").expect("corrupt index");
+    let issues = store.doctor().expect("doctor");
+    assert!(issues.iter().any(|issue| issue.code == "bad_index"));
+}
