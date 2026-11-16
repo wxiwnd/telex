@@ -1,0 +1,8 @@
+node_modules/
+.telex/
+.work/
+AGENTS.md
+*.log
+.DS_Store
+target/
+.cargo-home/
