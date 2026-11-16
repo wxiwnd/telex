@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::canonical::sha256_hex;
 use crate::domain::{Address, Envelope};
+use crate::index::{IndexedMessage, MailIndex};
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -175,6 +176,10 @@ impl Store {
         self.root.join("config.json")
     }
 
+    pub fn index_path(&self) -> PathBuf {
+        self.root.join("index.sqlite3")
+    }
+
     pub fn roles_dir(&self) -> PathBuf {
         self.root.join("seats")
     }
@@ -217,6 +222,7 @@ impl Store {
         for dir in ["mail", "state", "claims", "seats", "run", "runtime"] {
             let _ = fs::set_permissions(self.root.join(dir), fs::Permissions::from_mode(0o700));
         }
+        MailIndex::create(&self.index_path())?;
         let config = Config {
             domain,
             admin_password: Some(hash_password(admin_password)?),
@@ -552,6 +558,7 @@ impl Store {
 
     pub fn deliver(&self, envelope: &Envelope, recipients: &[String]) -> Result<DeliveryReport> {
         let mut report = DeliveryReport::default();
+        let mut index = self.open_index();
         for recipient in recipients {
             let mut copy = envelope.clone();
             copy.bcc.clear();
@@ -562,6 +569,10 @@ impl Store {
                 WriteOutcome::Duplicate => report.duplicates.push(recipient.clone()),
                 WriteOutcome::Conflict => bail!("id-conflict: {}", copy.message_id),
             }
+            self.index_upsert(
+                &mut index,
+                &IndexedMessage::from_envelope(&copy, recipient, "new"),
+            );
         }
         let sent_path = self.message_path(
             &envelope.from.address.to_string(),
@@ -571,7 +582,36 @@ impl Store {
         if self.write_message(&sent_path, envelope)? == WriteOutcome::Conflict {
             bail!("id-conflict in sent copy: {}", envelope.message_id);
         }
+        self.index_upsert(
+            &mut index,
+            &IndexedMessage::from_envelope(envelope, &envelope.from.address.to_string(), "sent"),
+        );
         Ok(report)
+    }
+
+    fn open_index(&self) -> Option<MailIndex> {
+        let path = self.index_path();
+        if !path.exists() {
+            return None;
+        }
+        match MailIndex::open(&path) {
+            Ok(index) => Some(index),
+            Err(_) => {
+                fs::remove_file(&path).ok();
+                None
+            }
+        }
+    }
+
+    fn index_upsert(&self, index: &mut Option<MailIndex>, message: &IndexedMessage) {
+        let failed = match index.as_ref() {
+            Some(active) => active.upsert(message).is_err(),
+            None => false,
+        };
+        if failed {
+            *index = None;
+            fs::remove_file(self.index_path()).ok();
+        }
     }
 
     fn write_message(&self, target: &Path, envelope: &Envelope) -> Result<WriteOutcome> {
@@ -637,6 +677,24 @@ impl Store {
         if folder != "new" && folder != "sent" {
             bail!("invalid folder: {folder}");
         }
+        if let Some(index) = self.open_index() {
+            match index.list(role, folder) {
+                Ok(rows) => {
+                    let mut entries = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        entries.push(self.entry_from_index(&index, role, row));
+                    }
+                    return Ok(entries);
+                }
+                Err(_) => {
+                    fs::remove_file(self.index_path()).ok();
+                }
+            }
+        }
+        self.scan_list(role, folder)
+    }
+
+    fn scan_list(&self, role: &str, folder: &str) -> Result<Vec<MailEntry>> {
         let dir = self.folder_dir(role, folder);
         let mut entries = Vec::new();
         let read_dir = match fs::read_dir(&dir) {
@@ -668,6 +726,81 @@ impl Store {
                 .then_with(|| b.message_id.cmp(&a.message_id))
         });
         Ok(entries)
+    }
+
+    fn entry_from_index(
+        &self,
+        index: &MailIndex,
+        role: &str,
+        message: IndexedMessage,
+    ) -> MailEntry {
+        let message_id = message.message_id.clone();
+        let seen = self.has_marker(&message_id, "seen", role);
+        let acked = self.has_marker(&message_id, "ack", role);
+        let expired = message
+            .expires_at
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|value| value.with_timezone(&Utc) < Utc::now());
+        let show_bcc = message.folder == "sent" || message.from_addr == role;
+        let recipients = if message.folder == "sent" {
+            self.recipient_statuses_indexed(
+                index,
+                &message_id,
+                &message.to,
+                &message.cc,
+                &message.bcc,
+            )
+        } else {
+            Vec::new()
+        };
+        let path = self
+            .message_path(role, &message.folder, &message_id)
+            .display()
+            .to_string();
+        MailEntry {
+            message_id: message_id.clone(),
+            thread_id: message.thread_id,
+            from: message.from_addr,
+            to: message.to,
+            cc: message.cc,
+            bcc: if show_bcc { message.bcc } else { Vec::new() },
+            subject: message.subject,
+            created_at: message.created_at,
+            intent: message.intent,
+            disposition: message.disposition,
+            priority: message.priority,
+            unread: message.folder == "new" && !seen && !expired,
+            seen,
+            acked,
+            expired,
+            recipients,
+            path,
+        }
+    }
+
+    fn recipient_statuses_indexed(
+        &self,
+        index: &MailIndex,
+        message_id: &str,
+        to: &[String],
+        cc: &[String],
+        bcc: &[String],
+    ) -> Vec<RecipientStatus> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for address in to.iter().chain(cc.iter()).chain(bcc.iter()) {
+            if !seen.insert(address.clone()) {
+                continue;
+            }
+            out.push(RecipientStatus {
+                delivered: index.has_copy(address, message_id).unwrap_or(false),
+                seen_at: self.marker_time(message_id, "seen", address),
+                acked_at: self.marker_time(message_id, "ack", address),
+                address: address.clone(),
+            });
+        }
+        out
     }
 
     fn entry_from(&self, role: &str, path: &Path, envelope: &Envelope, folder: &str) -> MailEntry {
@@ -893,6 +1026,36 @@ impl Store {
         {
             bail!("invalid thread or message id");
         }
+        if let Some(index) = self.open_index() {
+            let thread_id = match index.thread_id_for(thread_or_message) {
+                Ok(Some(thread_id)) => thread_id,
+                Ok(None) => thread_or_message.to_string(),
+                Err(_) => {
+                    fs::remove_file(self.index_path()).ok();
+                    return self.scan_thread(role, thread_or_message);
+                }
+            };
+            match index.thread(role, &thread_id) {
+                Ok(rows) => {
+                    let mut seen = std::collections::HashSet::new();
+                    let mut out = Vec::new();
+                    for row in rows {
+                        if !seen.insert(row.message_id.clone()) {
+                            continue;
+                        }
+                        out.push(self.entry_from_index(&index, role, row));
+                    }
+                    return Ok(out);
+                }
+                Err(_) => {
+                    fs::remove_file(self.index_path()).ok();
+                }
+            }
+        }
+        self.scan_thread(role, thread_or_message)
+    }
+
+    fn scan_thread(&self, role: &str, thread_or_message: &str) -> Result<Vec<MailEntry>> {
         let mut messages: std::collections::BTreeMap<String, (PathBuf, Envelope)> =
             std::collections::BTreeMap::new();
         let mail_root = self.root.join("mail");
@@ -1047,6 +1210,7 @@ impl Store {
     pub fn doctor(&self) -> Result<Vec<DoctorIssue>> {
         let mut issues = Vec::new();
         let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut message_count = 0usize;
 
         if let Ok(role_dirs) = fs::read_dir(self.root.join("mail")) {
             for role_entry in role_dirs.flatten() {
@@ -1097,6 +1261,7 @@ impl Store {
                         match read_json::<Envelope>(&path) {
                             Ok(envelope) => {
                                 known.insert(envelope.message_id.to_string());
+                                message_count += 1;
                             }
                             Err(_) => issues.push(DoctorIssue {
                                 code: "bad_json".into(),
@@ -1142,6 +1307,42 @@ impl Store {
             }
         }
 
+        let index_path = self.index_path();
+        if !index_path.exists() {
+            if message_count > 0 {
+                issues.push(DoctorIssue {
+                    code: "index_missing".into(),
+                    message: "messages exist but the SQLite index is missing".into(),
+                    path: index_path.display().to_string(),
+                });
+            }
+        } else {
+            match MailIndex::open(&index_path) {
+                Ok(index) => match index.counts() {
+                    Ok((indexed, _)) if indexed != message_count => {
+                        issues.push(DoctorIssue {
+                            code: "index_stale".into(),
+                            message: format!(
+                                "index has {indexed} message copies, spool has {message_count}"
+                            ),
+                            path: index_path.display().to_string(),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(_) => issues.push(DoctorIssue {
+                        code: "bad_index".into(),
+                        message: "cannot read the SQLite index".into(),
+                        path: index_path.display().to_string(),
+                    }),
+                },
+                Err(_) => issues.push(DoctorIssue {
+                    code: "bad_index".into(),
+                    message: "cannot open the SQLite index".into(),
+                    path: index_path.display().to_string(),
+                }),
+            }
+        }
+
         for (dir, code, label) in [
             (
                 self.root.join("state"),
@@ -1175,28 +1376,46 @@ impl Store {
     }
 
     pub fn index_rebuild(&self) -> Result<serde_json::Value> {
+        let result = self.rebuild_index();
+        if result.is_err() {
+            fs::remove_file(self.index_path()).ok();
+        }
+        result
+    }
+
+    fn rebuild_index(&self) -> Result<serde_json::Value> {
+        let index = MailIndex::reset(&self.index_path())?;
         let mut mailboxes = 0usize;
         let mut messages = 0usize;
+        let mut indexed = 0usize;
         if let Ok(roles) = fs::read_dir(self.root.join("mail")) {
             for role_entry in roles.flatten() {
                 if !role_entry.path().is_dir() {
                     continue;
                 }
                 mailboxes += 1;
+                let mailbox = role_entry.file_name().to_string_lossy().to_string();
                 for folder in ["new", "sent"] {
                     let Ok(entries) = fs::read_dir(role_entry.path().join(folder)) else {
                         continue;
                     };
-                    messages += entries
-                        .flatten()
-                        .filter(|entry| {
-                            entry.path().extension().and_then(|e| e.to_str()) == Some("json")
-                        })
-                        .count();
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                            continue;
+                        }
+                        messages += 1;
+                        let Ok(envelope) = read_json::<Envelope>(&path) else {
+                            continue;
+                        };
+                        index
+                            .upsert(&IndexedMessage::from_envelope(&envelope, &mailbox, folder))?;
+                        indexed += 1;
+                    }
                 }
             }
         }
-        Ok(json!({"mailboxes": mailboxes, "messages": messages}))
+        Ok(json!({"mailboxes": mailboxes, "messages": messages, "indexed": indexed}))
     }
 
     // ---------------------------------------------------------------- session env
