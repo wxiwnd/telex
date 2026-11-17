@@ -112,11 +112,6 @@ impl MailIndex {
         Self::create(path)
     }
 
-    pub fn clear(&self) -> Result<()> {
-        self.conn.execute("DELETE FROM mail", [])?;
-        Ok(())
-    }
-
     pub fn upsert(&self, message: &IndexedMessage) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO mail (
