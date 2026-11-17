@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::domain::{Address, Envelope, WakePolicy};
 use crate::protocol::{ApiError, PROTOCOL_VERSION, Request, Response};
-use crate::store::Store;
+use crate::store::{DeliveryReport, Role, Store};
 
 const WAKE_TIMEOUT_SECS: u64 = 30;
 
@@ -351,74 +351,11 @@ fn mail_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiE
     let auth = require_auth(&store, request)?;
     let role = guard(store.get_role(&auth.role))?
         .ok_or_else(|| ApiError::new("role_not_found", "role missing"))?;
-    let mut envelope: Envelope = serde_json::from_value(
-        param(&request.params, "envelope")
-            .cloned()
-            .ok_or_else(|| ApiError::new("validation", "missing envelope"))?,
-    )
-    .map_err(|err| ApiError::new("validation", err.to_string()))?;
-
-    envelope.from.address =
-        guard(Address::parse(&role.address, "local").map_err(anyhow::Error::from))?;
-    envelope.from.display = role.display.clone();
-    envelope.dedupe_key = envelope.compute_dedupe_key();
-    let parent = match envelope.in_reply_to {
-        Some(parent_id) => match store.read_message(&auth.role, &parent_id.to_string(), false) {
-            Ok(message) => Some(message.envelope),
-            Err(_) => {
-                return Err(ApiError::new(
-                    "validation",
-                    format!("parent message not found: {parent_id}"),
-                ));
-            }
-        },
-        None => None,
-    };
-    let errors = envelope.validate(parent.as_ref());
-    if !errors.is_empty() {
-        return Err(ApiError::new(
-            "validation",
-            errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; "),
-        ));
-    }
-
-    let mut recipients = Vec::new();
-    for address in envelope
-        .to
-        .iter()
-        .chain(envelope.cc.iter())
-        .chain(envelope.bcc.iter())
-    {
-        if guard(store.get_role(address.as_str()))?.is_none() {
-            return Err(ApiError::new(
-                "role_not_found",
-                format!("role not found: {address}"),
-            ));
-        }
-        recipients.push(address.to_string());
-    }
-
-    let report = guard(store.deliver(&envelope, &recipients))?;
-    let wake_targets: Vec<_> = envelope
-        .to
-        .iter()
-        .chain(envelope.bcc.iter())
-        .filter(|address| report.delivered.contains(&address.to_string()))
-        .cloned()
-        .collect();
+    let envelope = parse_envelope(request)?;
+    let sent = send_envelope(&store, envelope, &role)?;
     drop(store);
-
-    for address in &wake_targets {
-        maybe_wake(&store_arc, address.as_str(), &envelope);
-    }
-
-    Ok(
-        json!({"delivered": report.delivered, "duplicates": report.duplicates, "message_id": envelope.message_id.to_string()}),
-    )
+    finish_send(&store_arc, &sent);
+    Ok(send_result_json(&sent))
 }
 
 fn admin_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
@@ -430,15 +367,34 @@ fn admin_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Api
     let from = guard(Address::parse(&from_raw, &domain).map_err(anyhow::Error::from))?;
     let role = guard(store.get_role(from.as_str()))?
         .ok_or_else(|| ApiError::new("role_not_found", format!("role not found: {from}")))?;
-    let mut envelope: Envelope = serde_json::from_value(
+    let envelope = parse_envelope(request)?;
+    let sent = send_envelope(&store, envelope, &role)?;
+    drop(store);
+    finish_send(&store_arc, &sent);
+    Ok(send_result_json(&sent))
+}
+
+struct Sent {
+    report: DeliveryReport,
+    wake_targets: Vec<String>,
+    envelope: Envelope,
+}
+
+fn parse_envelope(request: &Request) -> Result<Envelope, ApiError> {
+    serde_json::from_value(
         param(&request.params, "envelope")
             .cloned()
             .ok_or_else(|| ApiError::new("validation", "missing envelope"))?,
     )
-    .map_err(|err| ApiError::new("validation", err.to_string()))?;
-    envelope.from.address = from;
+    .map_err(|err| ApiError::new("validation", err.to_string()))
+}
+
+fn send_envelope(store: &Store, mut envelope: Envelope, role: &Role) -> Result<Sent, ApiError> {
+    envelope.from.address =
+        guard(Address::parse(&role.address, "local").map_err(anyhow::Error::from))?;
     envelope.from.display = role.display.clone();
     envelope.dedupe_key = envelope.compute_dedupe_key();
+
     let parent = match envelope.in_reply_to {
         Some(parent_id) => match store.read_message(&role.address, &parent_id.to_string(), false) {
             Ok(message) => Some(message.envelope),
@@ -453,15 +409,9 @@ fn admin_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Api
     };
     let errors = envelope.validate(parent.as_ref());
     if !errors.is_empty() {
-        return Err(ApiError::new(
-            "validation",
-            errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; "),
-        ));
+        return Err(ApiError::new("validation", error_text(&errors)));
     }
+
     let mut recipients = Vec::new();
     for address in envelope
         .to
@@ -477,21 +427,42 @@ fn admin_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Api
         }
         recipients.push(address.to_string());
     }
+
     let report = guard(store.deliver(&envelope, &recipients))?;
     let wake_targets: Vec<_> = envelope
         .to
         .iter()
         .chain(envelope.bcc.iter())
-        .filter(|address| report.delivered.contains(&address.to_string()))
-        .cloned()
+        .map(|address| address.to_string())
+        .filter(|address| report.delivered.contains(address))
         .collect();
-    drop(store);
-    for address in &wake_targets {
-        maybe_wake(&store_arc, address.as_str(), &envelope);
+    Ok(Sent {
+        report,
+        wake_targets,
+        envelope,
+    })
+}
+
+fn error_text(errors: &[crate::domain::ValidationError]) -> String {
+    errors
+        .iter()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn finish_send(store: &Arc<Mutex<Store>>, sent: &Sent) {
+    for address in &sent.wake_targets {
+        maybe_wake(store, address.as_str(), &sent.envelope);
     }
-    Ok(
-        json!({"delivered": report.delivered, "duplicates": report.duplicates, "message_id": envelope.message_id.to_string()}),
-    )
+}
+
+fn send_result_json(sent: &Sent) -> Value {
+    json!({
+        "delivered": sent.report.delivered,
+        "duplicates": sent.report.duplicates,
+        "message_id": sent.envelope.message_id.to_string(),
+    })
 }
 
 fn maybe_wake(store: &Arc<Mutex<Store>>, role: &str, envelope: &Envelope) {
