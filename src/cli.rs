@@ -56,14 +56,13 @@ enum Commands {
     Release(IdArgs),
     /// Run a role's wake command.
     Wake(WakeArgs),
-    /// Harness hook entry point. Reads hook JSON from stdin.
+    /// Internal hook entry point. Reads hook JSON from stdin.
+    #[command(hide = true)]
     Hook(HookArgs),
-    /// Print or install harness hook settings.
-    HookConfig(HookConfigArgs),
+    /// Connect Telex to a harness, or show connection status.
+    Connect(ConnectArgs),
     /// Write the AGENTS.md fallback block.
     AgentsMd(AgentsMdArgs),
-    /// Print or install the Telex skill for a harness.
-    Skill(SkillArgs),
     /// One-line unread summary.
     InboxLine(InboxLineArgs),
     /// Write the fallback inbox file.
@@ -268,44 +267,26 @@ struct HookArgs {
     event: String,
     #[arg(long, default_value = "unknown")]
     harness: String,
-    #[command(subcommand)]
-    command: Option<HookSub>,
-}
-
-#[derive(Subcommand)]
-enum HookSub {
-    /// Check hook and skill installation.
-    Status(HookStatusArgs),
-    /// Run a synthetic payload through the hook path.
-    Test(HookTestArgs),
 }
 
 #[derive(Args)]
-struct HookStatusArgs {
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
-struct HookTestArgs {
-    #[arg(long, default_value = "codex")]
-    harness: String,
-    #[arg(long, default_value = "SessionStart")]
-    event: String,
-    /// Test a real session id instead of a synthetic one.
-    #[arg(long)]
-    session: Option<String>,
-}
-
-#[derive(Args)]
-struct HookConfigArgs {
-    harness: String,
+struct ConnectArgs {
+    /// claude, codex, or dsh. Omit to show connection status.
+    harness: Option<String>,
+    /// Write the configuration instead of printing it.
     #[arg(long)]
     write: bool,
-    #[arg(long)]
-    file: Option<PathBuf>,
+    /// Hook events for Claude Code and Codex, comma separated.
     #[arg(long, default_value = "SessionStart")]
     events: String,
+    /// Override the config file, or the skill file for dsh.
+    #[arg(long)]
+    file: Option<PathBuf>,
+    /// Run a synthetic SessionStart payload after connecting.
+    #[arg(long)]
+    test: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -314,16 +295,6 @@ struct AgentsMdArgs {
     write: bool,
     #[arg(long, default_value = "AGENTS.md")]
     file: PathBuf,
-}
-
-#[derive(Args)]
-struct SkillArgs {
-    harness: String,
-    #[arg(long)]
-    write: bool,
-    /// Skills directory. Default for dsh: ~/.dsh/skills.
-    #[arg(long)]
-    dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -400,9 +371,8 @@ pub fn run() -> Result<()> {
         ),
         Commands::Wake(args) => wake(&home, args),
         Commands::Hook(args) => hook(&home, args),
-        Commands::HookConfig(args) => hook_config(args),
+        Commands::Connect(args) => connect(&home, args),
         Commands::AgentsMd(args) => agents_md(args),
-        Commands::Skill(args) => skill(args),
         Commands::InboxLine(args) => inbox_line(&home, args),
         Commands::InboxFile(args) => inbox_file(&home, args),
         Commands::Doctor(args) => doctor(&home, args),
@@ -1056,7 +1026,7 @@ fn hook_session(payload: &Value) -> Option<String> {
 }
 
 /// Compute what the hook should print for one payload. Shared by the stdin
-/// entry point and `tlx hook test`, so the fixture path exercises the same
+/// entry point and `tlx connect --test`, so the fixture path exercises the same
 /// code as a real harness invocation.
 fn evaluate_hook(home: &Path, payload: &Value, event: &str) -> HookOutcome {
     let kind = hook_event_kind(event);
@@ -1112,42 +1082,64 @@ fn evaluate_hook(home: &Path, payload: &Value, event: &str) -> HookOutcome {
 }
 
 fn hook(home: &Path, args: HookArgs) -> Result<()> {
-    match args.command {
-        Some(HookSub::Status(status_args)) => hook_status(home, status_args),
-        Some(HookSub::Test(test_args)) => hook_test(home, test_args),
-        None => {
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input).ok();
-            let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
-            let event = payload["hook_event_name"]
-                .as_str()
-                .unwrap_or(&args.event)
-                .to_string();
-            let outcome = evaluate_hook(home, &payload, &event);
-            for line in &outcome.stdout {
-                println!("{line}");
-            }
-            if let Some(stderr_line) = outcome.stop_stderr {
-                eprintln!("{stderr_line}");
-                std::process::exit(2);
-            }
-            Ok(())
-        }
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input).ok();
+    let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+    let event = payload["hook_event_name"]
+        .as_str()
+        .unwrap_or(&args.event)
+        .to_string();
+    let outcome = evaluate_hook(home, &payload, &event);
+    for line in &outcome.stdout {
+        println!("{line}");
     }
+    if let Some(stderr_line) = outcome.stop_stderr {
+        eprintln!("{stderr_line}");
+        std::process::exit(2);
+    }
+    Ok(())
 }
 
-fn hook_test(home: &Path, args: HookTestArgs) -> Result<()> {
-    let session = args
-        .session
-        .clone()
-        .unwrap_or_else(|| format!("tlx-hook-test-{}", args.harness));
+fn connect(home: &Path, args: ConnectArgs) -> Result<()> {
+    let Some(raw_harness) = args.harness.as_deref() else {
+        if args.write || args.test {
+            bail!("name a harness: claude, codex, or dsh");
+        }
+        return connect_status(home, args.json);
+    };
+    let harness = raw_harness.to_ascii_lowercase();
+    match harness.as_str() {
+        "claude" | "codex" => {
+            if args.write || !args.test {
+                connect_hook(&harness, &args)?;
+            }
+            if args.test {
+                connect_test(home, &harness);
+            }
+        }
+        "dsh" => {
+            if args.events != "SessionStart" {
+                bail!("dsh uses a skill, not hook events");
+            }
+            if args.test {
+                bail!("--test applies to claude and codex hooks, not the dsh skill");
+            }
+            connect_skill(&args)?;
+        }
+        other => bail!("unknown harness: {other}. Use claude, codex, or dsh"),
+    }
+    Ok(())
+}
+
+fn connect_test(home: &Path, harness: &str) {
+    let session = format!("tlx-connect-test-{harness}");
     let payload = json!({
         "session_id": session,
-        "hook_event_name": args.event,
+        "hook_event_name": "SessionStart",
         "cwd": ".",
     });
-    let outcome = evaluate_hook(home, &payload, &args.event);
-    println!("event: {}", args.event);
+    let outcome = evaluate_hook(home, &payload, "SessionStart");
+    println!("event: SessionStart");
     println!("session: {session}");
     if outcome.stdout.is_empty() && outcome.stop_stderr.is_none() {
         println!("output: (none)");
@@ -1159,7 +1151,6 @@ fn hook_test(home: &Path, args: HookTestArgs) -> Result<()> {
         println!("stderr: {stderr_line}");
         println!("exit code: 2");
     }
-    Ok(())
 }
 
 struct HookConfigStatus {
@@ -1228,11 +1219,9 @@ fn extract_command_binary(command: &str) -> Option<String> {
 }
 
 fn describe_hook_config(status: &HookConfigStatus) -> String {
-    if !status.path.exists() {
-        format!("{}: {}（文件不存在）", status.name, status.path.display())
-    } else if !status.installed {
+    if !status.path.exists() || !status.installed {
         format!(
-            "{}: {}（未安装，运行 tlx hook-config {} --write）",
+            "{}: {}（未安装，运行 tlx connect {} --write）",
             status.name,
             status.path.display(),
             status.name
@@ -1252,7 +1241,7 @@ fn describe_hook_config(status: &HookConfigStatus) -> String {
     }
 }
 
-fn hook_status(home: &Path, args: HookStatusArgs) -> Result<()> {
+fn connect_status(home: &Path, json_output: bool) -> Result<()> {
     let user_home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
     let codex_home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -1264,7 +1253,7 @@ fn hook_status(home: &Path, args: HookStatusArgs) -> Result<()> {
     let maild_ok = Client::new(home).call("hello", None, json!({})).is_ok();
     let initialized = Store::new(home).config_path().exists();
 
-    if args.json {
+    if json_output {
         let value = json!({
             "claude": {
                 "path": claude.path.display().to_string(),
@@ -1295,7 +1284,7 @@ fn hook_status(home: &Path, args: HookStatusArgs) -> Result<()> {
         println!("dsh skill: {}（已安装）", dsh_skill_path.display());
     } else {
         println!(
-            "dsh skill: {}（未安装，运行 tlx skill dsh --write）",
+            "dsh skill: {}（未安装，运行 tlx connect dsh --write）",
             dsh_skill_path.display()
         );
     }
@@ -1350,18 +1339,14 @@ fn codex_hook_timeout(event: &str) -> u64 {
     }
 }
 
-fn hook_config(args: HookConfigArgs) -> Result<()> {
+fn connect_hook(harness: &str, args: &ConnectArgs) -> Result<()> {
     let user_home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
-    let (harness, default_file) = match args.harness.as_str() {
-        "claude" => ("claude", user_home.join(".claude/settings.json")),
-        "codex" => (
-            "codex",
-            std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| user_home.join(".codex"))
-                .join("hooks.json"),
-        ),
-        other => bail!("hook-config supports claude and codex, not {other}"),
+    let default_file = match harness {
+        "claude" => user_home.join(".claude/settings.json"),
+        _ => std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| user_home.join(".codex"))
+            .join("hooks.json"),
     };
     let mut hooks = serde_json::Map::new();
     for event in args
@@ -1393,7 +1378,7 @@ fn hook_config(args: HookConfigArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&settings)?);
         return Ok(());
     }
-    let file = args.file.unwrap_or(default_file);
+    let file = args.file.clone().unwrap_or(default_file);
     let mut doc: Value = std::fs::read_to_string(&file)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -1424,12 +1409,9 @@ fn hook_config(args: HookConfigArgs) -> Result<()> {
         }
     }
     std::fs::write(&file, serde_json::to_string_pretty(&doc)? + "\n")?;
+    println!("connected {harness}: {}", file.display());
     if harness == "codex" {
-        // Codex refuses to run untrusted hooks; surface the one manual step.
-        println!("updated {}", file.display());
         println!("启动 codex 后运行 /hooks 审核并信任 Telex 的 hook，否则不会执行。");
-    } else {
-        println!("updated {}", file.display());
     }
     Ok(())
 }
@@ -1449,20 +1431,18 @@ description: 本机 agent 邮箱。会话开始时检查 Telex 未读邮件并�
 - 发信：`tlx send --to <地址> --subject <主题> --body <正文>`，完整参数看 `tlx send --help`。
 "#;
 
-fn skill(args: SkillArgs) -> Result<()> {
-    if args.harness != "dsh" {
-        bail!("skill currently supports dsh only, not {}", args.harness);
-    }
+fn connect_skill(args: &ConnectArgs) -> Result<()> {
     if !args.write {
         println!("{DSH_SKILL}");
         return Ok(());
     }
-    let dir = args.dir.unwrap_or_else(|| {
+    let target = args.file.clone().unwrap_or_else(|| {
         PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
             .join(".dsh")
             .join("skills")
+            .join("telex")
+            .join("SKILL.md")
     });
-    let target = dir.join("telex").join("SKILL.md");
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1475,7 +1455,7 @@ fn skill(args: SkillArgs) -> Result<()> {
         std::fs::write(format!("{}.bak", target.display()), &existing).ok();
     }
     std::fs::write(&target, DSH_SKILL)?;
-    println!("wrote {}", target.display());
+    println!("connected dsh: {}", target.display());
     println!("重启 DSH 会话后生效。");
     Ok(())
 }
