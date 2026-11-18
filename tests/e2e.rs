@@ -672,3 +672,215 @@ fn init_rejects_an_invalid_domain() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("invalid domain"));
 }
+
+#[test]
+fn hook_prints_bootstrap_line_for_unbound_session() {
+    let harness = Harness::new();
+    let out = harness.run(
+        None,
+        &["hook", "--event", "SessionStart"],
+        Some(r#"{"session_id":"ghost-session"}"#),
+    );
+    assert!(out.status.success(), "hook: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("未绑定"), "bootstrap line: {text}");
+    assert!(
+        text.contains("ghost-session"),
+        "session id surfaced: {text}"
+    );
+    assert!(
+        text.contains("TELEX_SESSION_ID=ghost-session"),
+        "login hint: {text}"
+    );
+
+    // UserPromptSubmit stays quiet for unbound sessions: one nudge per
+    // session is enough.
+    let out = harness.run(
+        None,
+        &["hook", "--event", "UserPromptSubmit"],
+        Some(r#"{"session_id":"ghost-session"}"#),
+    );
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "", "UserPromptSubmit should stay silent");
+}
+
+#[test]
+fn hook_event_name_from_payload_wins_over_flag() {
+    let harness = Harness::new();
+    harness.add_role("lead@local");
+    harness.add_role("worker@local");
+    harness.bind("session-lead", "lead@local");
+    harness.bind("session-worker", "worker@local");
+
+    let sent = harness.run(
+        Some("session-lead"),
+        &[
+            "send",
+            "--to",
+            "worker@local",
+            "--subject",
+            "hi",
+            "--body",
+            "there",
+            "--json",
+        ],
+        None,
+    );
+    assert!(sent.status.success(), "send: {}", stderr(&sent));
+
+    // Flag says SessionStart, payload says UserPromptSubmit: payload wins and
+    // the badge still prints.
+    let out = harness.run(
+        Some("session-worker"),
+        &["hook", "--event", "SessionStart", "--harness", "claude"],
+        Some(r#"{"session_id":"session-worker","hook_event_name":"UserPromptSubmit"}"#),
+    );
+    assert!(out.status.success(), "hook: {}", stderr(&out));
+    assert!(stdout(&out).contains("1 封未读"), "badge: {}", stdout(&out));
+
+    // Payload says Stop: exit code 2 with the badge on stderr.
+    let out = harness.run(
+        Some("session-worker"),
+        &["hook", "--event", "SessionStart", "--harness", "claude"],
+        Some(r#"{"session_id":"session-worker","hook_event_name":"Stop"}"#),
+    );
+    assert_eq!(out.status.code(), Some(2), "stop exit code");
+    assert!(
+        stderr(&out).contains("1 封未读"),
+        "stop stderr: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn hook_config_codex_writes_and_merges_idempotently() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let file = dir.path().join("hooks.json");
+    std::fs::write(
+        &file,
+        r#"{"description":"keep me","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/bin/true"}]}]}}"#,
+    )
+    .expect("seed");
+
+    let out = run(
+        &home,
+        None,
+        &[
+            "hook-config",
+            "codex",
+            "--write",
+            "--file",
+            file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(out.status.success(), "hook-config: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("/hooks"),
+        "trust reminder printed: {}",
+        stdout(&out)
+    );
+
+    let value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).expect("read")).expect("json");
+    assert_eq!(value["description"], "keep me", "description preserved");
+    let stop_commands: Vec<&str> = value["hooks"]["Stop"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|group| group["hooks"].as_array())
+        .flatten()
+        .filter_map(|handler| handler["command"].as_str())
+        .collect();
+    assert!(stop_commands.contains(&"/bin/true"), "existing hook kept");
+
+    let session_start = value["hooks"]["SessionStart"].as_array().expect("group");
+    assert_eq!(
+        session_start[0]["matcher"],
+        "startup|resume|clear|compact|fork"
+    );
+    let handler = &session_start[0]["hooks"][0];
+    assert_eq!(handler["type"], "command");
+    assert_eq!(handler["timeout"], 10);
+    assert!(
+        handler["command"]
+            .as_str()
+            .unwrap()
+            .contains("hook --event SessionStart --harness codex")
+    );
+
+    // Second run is idempotent.
+    let out = run(
+        &home,
+        None,
+        &[
+            "hook-config",
+            "codex",
+            "--write",
+            "--file",
+            file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(out.status.success());
+    let value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).expect("read")).expect("json");
+    let telex_count = value["hooks"]["SessionStart"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|group| group["hooks"].as_array())
+        .flatten()
+        .filter_map(|handler| handler["command"].as_str())
+        .filter(|command| command.contains("hook --event"))
+        .count();
+    assert_eq!(telex_count, 1, "not idempotent");
+}
+
+#[test]
+fn skill_dsh_writes_idempotently() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let skills = dir.path().join("skills");
+
+    let owned: Vec<String> = vec![
+        "skill".into(),
+        "dsh".into(),
+        "--write".into(),
+        "--dir".into(),
+        skills.to_string_lossy().to_string(),
+    ];
+    let arg_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+    let out = run(&home, None, &arg_refs, None);
+    assert!(out.status.success(), "skill: {}", stderr(&out));
+
+    let target = skills.join("telex").join("SKILL.md");
+    let first = std::fs::read_to_string(&target).expect("skill file");
+    assert!(
+        first.starts_with("---\nname: telex\n"),
+        "frontmatter: {first}"
+    );
+    assert!(first.contains("tlx inbox-line"), "instruction: {first}");
+
+    let out = run(&home, None, &arg_refs, None);
+    assert!(out.status.success());
+    let second = std::fs::read_to_string(&target).expect("skill file");
+    assert_eq!(first, second, "not idempotent");
+}
+
+#[test]
+fn hook_test_runs_a_synthetic_payload() {
+    let harness = Harness::new();
+    let out = harness.run(None, &["hook", "test", "--harness", "codex"], None);
+    assert!(out.status.success(), "hook test: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("event: SessionStart"), "event echoed: {text}");
+    assert!(
+        text.contains("session: tlx-hook-test-codex"),
+        "session: {text}"
+    );
+    assert!(text.contains("未绑定"), "bootstrap path shown: {text}");
+}
