@@ -332,7 +332,7 @@ fn wake_command_runs_on_delivery() {
 }
 
 #[test]
-fn hook_config_merges_without_clobbering_and_agents_md_is_idempotent() {
+fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
     let dir = TempDir::new().expect("temp");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home");
@@ -347,7 +347,7 @@ fn hook_config_merges_without_clobbering_and_agents_md_is_idempotent() {
         &home,
         None,
         &[
-            "hook-config",
+            "connect",
             "claude",
             "--write",
             "--file",
@@ -355,7 +355,7 @@ fn hook_config_merges_without_clobbering_and_agents_md_is_idempotent() {
         ],
         None,
     );
-    assert!(out.status.success(), "hook-config: {}", stderr(&out));
+    assert!(out.status.success(), "connect: {}", stderr(&out));
     let value: Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("json");
     assert_eq!(value["model"], "keep-me");
@@ -370,7 +370,7 @@ fn hook_config_merges_without_clobbering_and_agents_md_is_idempotent() {
         &home,
         None,
         &[
-            "hook-config",
+            "connect",
             "claude",
             "--write",
             "--file",
@@ -753,7 +753,7 @@ fn hook_event_name_from_payload_wins_over_flag() {
 }
 
 #[test]
-fn hook_config_codex_writes_and_merges_idempotently() {
+fn connect_codex_writes_and_merges_idempotently() {
     let dir = TempDir::new().expect("temp");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home");
@@ -768,7 +768,7 @@ fn hook_config_codex_writes_and_merges_idempotently() {
         &home,
         None,
         &[
-            "hook-config",
+            "connect",
             "codex",
             "--write",
             "--file",
@@ -776,7 +776,7 @@ fn hook_config_codex_writes_and_merges_idempotently() {
         ],
         None,
     );
-    assert!(out.status.success(), "hook-config: {}", stderr(&out));
+    assert!(out.status.success(), "connect: {}", stderr(&out));
     assert!(
         stdout(&out).contains("/hooks"),
         "trust reminder printed: {}",
@@ -816,7 +816,7 @@ fn hook_config_codex_writes_and_merges_idempotently() {
         &home,
         None,
         &[
-            "hook-config",
+            "connect",
             "codex",
             "--write",
             "--file",
@@ -840,24 +840,24 @@ fn hook_config_codex_writes_and_merges_idempotently() {
 }
 
 #[test]
-fn skill_dsh_writes_idempotently() {
+fn connect_dsh_writes_idempotently() {
     let dir = TempDir::new().expect("temp");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home");
     let skills = dir.path().join("skills");
 
+    let target = skills.join("telex").join("SKILL.md");
     let owned: Vec<String> = vec![
-        "skill".into(),
+        "connect".into(),
         "dsh".into(),
         "--write".into(),
-        "--dir".into(),
-        skills.to_string_lossy().to_string(),
+        "--file".into(),
+        target.to_string_lossy().to_string(),
     ];
     let arg_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
     let out = run(&home, None, &arg_refs, None);
-    assert!(out.status.success(), "skill: {}", stderr(&out));
+    assert!(out.status.success(), "connect: {}", stderr(&out));
 
-    let target = skills.join("telex").join("SKILL.md");
     let first = std::fs::read_to_string(&target).expect("skill file");
     assert!(
         first.starts_with("---\nname: telex\n"),
@@ -872,14 +872,14 @@ fn skill_dsh_writes_idempotently() {
 }
 
 #[test]
-fn hook_test_runs_a_synthetic_payload() {
+fn connect_test_runs_a_synthetic_payload() {
     let harness = Harness::new();
-    let out = harness.run(None, &["hook", "test", "--harness", "codex"], None);
-    assert!(out.status.success(), "hook test: {}", stderr(&out));
+    let out = harness.run(None, &["connect", "codex", "--test"], None);
+    assert!(out.status.success(), "connect test: {}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("event: SessionStart"), "event echoed: {text}");
     assert!(
-        text.contains("session: tlx-hook-test-codex"),
+        text.contains("session: tlx-connect-test-codex"),
         "session: {text}"
     );
     assert!(text.contains("未绑定"), "bootstrap path shown: {text}");

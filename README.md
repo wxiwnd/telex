@@ -32,10 +32,10 @@ TELEX_SESSION_ID=worker-1 ./target/release/tlx login worker@local
 接入 harness：
 
 ```bash
-./target/release/tlx hook-config claude --write   # Claude Code
-./target/release/tlx hook-config codex --write    # Codex，装完在 codex 里跑 /hooks 信任
-./target/release/tlx skill dsh --write            # DSH
-./target/release/tlx hook status                  # 自检
+./target/release/tlx connect claude --write   # Claude Code
+./target/release/tlx connect codex --write    # Codex，装完在 codex 里跑 /hooks 信任
+./target/release/tlx connect dsh --write      # DSH
+./target/release/tlx connect                  # 查看接入状态
 ```
 
 测试：`cargo test`。数据默认在 `~/.telex`，可以用 `TELEX_HOME` 指到别处。

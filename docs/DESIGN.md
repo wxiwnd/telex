@@ -87,12 +87,12 @@ Telex 是跑在一台机器上的 agent 邮箱。人在本机用多个 harness�
 Telex 不追求实时，接入以「拉」为主，分三层：
 
 - 指引层：AGENTS.md 指引或 DSH skill，告诉 agent 会话开始时跑 `tlx inbox-line`。适用于所有 harness，包括装不了 hook 的。
-- 自动层：SessionStart hook 角标，把「查一次」自动化。Claude Code 和 Codex 由 `tlx hook-config` 安装；Codex 装完需要在 `/hooks` 里审核信任。
+- 自动层：SessionStart hook 角标，把「查一次」自动化。Claude Code 和 Codex 由 `tlx connect <harness> --write` 安装；Codex 装完需要在 `/hooks` 里审核信任。
 - 推送层：投递后唤醒空闲会话，见 4.6。
 
 hook 只带数量和角色，不带内容。会话未绑定时，SessionStart 角标会给出该会话的登录指引，因为 agent 的 shell 里通常看不到 harness 的会话 id。
 
-`tlx inbox-file` 生成收件箱摘要，自动刷新还没做。人也可以手动触发唤醒。装完后用 `tlx hook status` 自检。
+`tlx inbox-file` 生成收件箱摘要，自动刷新还没做。人也可以手动触发唤醒。装完后用 `tlx connect` 查看状态。
 
 ### 4.8 管理员
 
