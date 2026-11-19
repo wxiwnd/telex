@@ -1,11 +1,12 @@
 use chrono::{Duration, Utc};
 use telex::domain::{Address, Envelope, Intent};
+use telex::paths::Paths;
 use telex::store::Store;
 use tempfile::TempDir;
 
 fn store() -> (TempDir, Store) {
     let dir = TempDir::new().expect("temp dir");
-    let store = Store::new(dir.path());
+    let store = Store::new(Paths::at_root(dir.path()));
     store.init("admin-password-123", "local").expect("init");
     (dir, store)
 }
@@ -204,12 +205,26 @@ fn doctor_reports_corrupt_and_orphans() {
         .expect("deliver");
 
     std::fs::write(
-        store.root().join("mail/worker@local/new/broken.json"),
+        store
+            .paths()
+            .mail_dir()
+            .join("worker@local")
+            .join("new")
+            .join("broken.json"),
         "{not json",
     )
     .expect("write");
-    std::fs::write(store.root().join("mail/worker@local/new/empty.json"), "").expect("write");
-    std::fs::create_dir_all(store.root().join("state/orphan-id")).expect("mkdir");
+    std::fs::write(
+        store
+            .paths()
+            .mail_dir()
+            .join("worker@local")
+            .join("new")
+            .join("empty.json"),
+        "",
+    )
+    .expect("write");
+    std::fs::create_dir_all(store.paths().markers_dir().join("orphan-id")).expect("mkdir");
 
     let issues = store.doctor().expect("doctor");
     assert!(issues.iter().any(|issue| issue.code == "bad_json"));

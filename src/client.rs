@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -10,38 +10,35 @@ use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde_json::Value;
 
+use crate::paths::Paths;
 use crate::protocol::{ApiError, Request, Response};
 use crate::store::Store;
 
 pub struct Client {
-    home: PathBuf,
+    paths: Paths,
 }
 
 impl Client {
-    pub fn new(home: impl Into<PathBuf>) -> Self {
-        Self { home: home.into() }
-    }
-
-    pub fn home(&self) -> &Path {
-        &self.home
+    pub fn new(paths: Paths) -> Self {
+        Self { paths }
     }
 
     fn socket(&self) -> PathBuf {
-        self.home.join("run").join("maild.sock")
+        self.paths.socket_path()
     }
 
     pub fn ensure_daemon(&self) -> Result<()> {
         if UnixStream::connect(self.socket()).is_ok() {
             return Ok(());
         }
-        let store = Store::new(&self.home);
+        let store = Store::new(self.paths.clone());
         if !store.config_path().exists() {
             bail!("not initialized: run `tlx init` first");
         }
         store.load_config().context("read config.json")?;
-        let run_dir = self.home.join("run");
-        std::fs::create_dir_all(&run_dir)?;
-        let lock_path = run_dir.join("maild.lock");
+        let run_dir = self.paths.runtime_dir();
+        std::fs::create_dir_all(run_dir)?;
+        let lock_path = self.paths.lock_path();
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -56,7 +53,6 @@ impl Client {
         let exe = std::env::current_exe().context("locate tlx binary")?;
         Command::new(exe)
             .args(["maild", "--foreground"])
-            .env("TELEX_HOME", &self.home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

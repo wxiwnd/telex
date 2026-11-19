@@ -14,6 +14,7 @@ pub mod client;
 pub mod domain;
 pub mod index;
 pub mod maild;
+pub mod paths;
 pub mod protocol;
 pub mod store;
 

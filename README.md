@@ -36,7 +36,21 @@ TELEX_SESSION_ID=worker-1 ./target/release/tlx login worker@local
 ./target/release/tlx connect                  # 查看接入状态
 ```
 
-测试：`cargo test`。数据默认在 `~/.telex`，可以用 `TELEX_HOME` 指到别处。
+测试：`cargo test`。
+
+## 数据位置
+
+所有路径遵循 XDG Base Directory 规范：
+
+| 内容 | 路径 |
+|---|---|
+| 配置 | `~/.config/telex/config.json` |
+| 角色、邮件、已读/回执 marker | `~/.local/share/telex/` |
+| 登录、token、待批申请、claim、唤醒记录 | `~/.local/state/telex/` |
+| SQLite 索引 | `~/.cache/telex/index.sqlite3` |
+| socket、锁 | `$XDG_RUNTIME_DIR/telex/` |
+
+`XDG_RUNTIME_DIR` 未设置时回退到 `~/.local/state/telex/run/`。`XDG_CONFIG_HOME` 等变量存在时优先使用；相对路径会被忽略。
 
 ## 设计
 整体架构如下图所示：
