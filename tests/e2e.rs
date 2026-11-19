@@ -22,14 +22,15 @@ impl Harness {
         let init = run(&home, None, &["init", "--password-stdin"], Some(PASSWORD));
         assert!(init.status.success(), "init: {}", stderr(&init));
 
-        let child = Command::new(bin())
-            .args(["maild", "--foreground"])
-            .env("TELEX_HOME", &home)
+        let mut child = Command::new(bin());
+        child.args(["maild", "--foreground"]);
+        xdg_env(&mut child, &home);
+        let child = child
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn maild");
-        let socket = home.join("run/maild.sock");
+        let socket = home.join("run/telex/maild.sock");
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
             if socket.exists() {
@@ -95,7 +96,6 @@ fn run(home: &Path, session: Option<&str>, args: &[&str], input: Option<&str>) -
     let mut command = Command::new(bin());
     command
         .args(args)
-        .env("TELEX_HOME", home)
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("DSH_SESSION_ID")
@@ -108,6 +108,7 @@ fn run(home: &Path, session: Option<&str>, args: &[&str], input: Option<&str>) -
     } else {
         Stdio::null()
     });
+    xdg_env(&mut command, home);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     let mut child = command.spawn().expect("spawn tlx");
@@ -120,6 +121,15 @@ fn run(home: &Path, session: Option<&str>, args: &[&str], input: Option<&str>) -
             .expect("write stdin");
     }
     child.wait_with_output().expect("wait tlx")
+}
+
+fn xdg_env(command: &mut Command, root: &Path) {
+    command
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("XDG_RUNTIME_DIR", root.join("run"));
 }
 
 fn stdout(output: &Output) -> String {

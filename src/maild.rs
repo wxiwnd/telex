@@ -3,7 +3,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,13 +12,14 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::domain::{Address, Envelope, WakePolicy};
+use crate::paths::Paths;
 use crate::protocol::{ApiError, PROTOCOL_VERSION, Request, Response};
 use crate::store::{DeliveryReport, Role, Store};
 
 const WAKE_TIMEOUT_SECS: u64 = 30;
 
-pub fn run(home: PathBuf) -> Result<()> {
-    let store = Store::new(home);
+pub fn run(paths: Paths) -> Result<()> {
+    let store = Store::new(paths);
     if !store.config_path().exists() {
         bail!("not initialized: run `tlx init` first");
     }
@@ -28,7 +29,7 @@ pub fn run(home: PathBuf) -> Result<()> {
 
     let socket_path = store.socket_path();
     if UnixStream::connect(&socket_path).is_ok() {
-        bail!("another maild is already serving this TELEX_HOME");
+        bail!("another maild is already running for this Telex home");
     }
     if socket_path.exists() {
         std::fs::remove_file(&socket_path).ok();

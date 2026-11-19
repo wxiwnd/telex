@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::domain::canonical::sha256_hex;
 use crate::domain::{Address, Envelope};
 use crate::index::{IndexedMessage, MailIndex};
+use crate::paths::Paths;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -160,40 +161,40 @@ enum WriteOutcome {
 }
 
 pub struct Store {
-    root: PathBuf,
+    paths: Paths,
 }
 
 impl Store {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    pub fn new(paths: Paths) -> Self {
+        Self { paths }
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
+    pub fn paths(&self) -> &Paths {
+        &self.paths
     }
 
     pub fn config_path(&self) -> PathBuf {
-        self.root.join("config.json")
+        self.paths.config_file()
     }
 
     pub fn index_path(&self) -> PathBuf {
-        self.root.join("index.sqlite3")
+        self.paths.index_file()
     }
 
     pub fn roles_dir(&self) -> PathBuf {
-        self.root.join("seats")
+        self.paths.seats_dir()
     }
 
     pub fn run_dir(&self) -> PathBuf {
-        self.root.join("run")
+        self.paths.runtime_dir().to_path_buf()
     }
 
     pub fn socket_path(&self) -> PathBuf {
-        self.run_dir().join("maild.sock")
+        self.paths.socket_path()
     }
 
     pub fn lock_path(&self) -> PathBuf {
-        self.run_dir().join("maild.lock")
+        self.paths.lock_path()
     }
 
     pub fn init(&self, admin_password: &str, domain: &str) -> Result<()> {
@@ -203,24 +204,32 @@ impl Store {
         let domain = domain.to_ascii_lowercase();
         Address::parse("probe", &domain).map_err(|err| anyhow!("invalid domain: {err}"))?;
         for dir in [
-            self.root.clone(),
-            self.root.join("mail"),
-            self.root.join("state"),
-            self.root.join("claims"),
-            self.roles_dir(),
-            self.run_dir(),
-            self.runtime_dir().join("pending"),
-            self.runtime_dir().join("auth"),
-            self.runtime_dir().join("tokens"),
-            self.runtime_dir().join("revoked"),
-            self.runtime_dir().join("wake"),
-            self.runtime_dir().join("hook"),
+            self.paths.config_dir().to_path_buf(),
+            self.paths.data_dir().to_path_buf(),
+            self.paths.state_dir().to_path_buf(),
+            self.paths.cache_dir().to_path_buf(),
+            self.paths.runtime_dir().to_path_buf(),
+            self.paths.mail_dir(),
+            self.paths.markers_dir(),
+            self.paths.claims_dir(),
+            self.paths.seats_dir(),
+            self.paths.pending_dir(),
+            self.paths.auth_dir(),
+            self.paths.tokens_dir(),
+            self.paths.revoked_dir(),
+            self.paths.wake_dir(),
+            self.paths.hook_dir(),
         ] {
             fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         }
-        let _ = fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700));
-        for dir in ["mail", "state", "claims", "seats", "run", "runtime"] {
-            let _ = fs::set_permissions(self.root.join(dir), fs::Permissions::from_mode(0o700));
+        for dir in [
+            self.paths.config_dir(),
+            self.paths.data_dir(),
+            self.paths.state_dir(),
+            self.paths.cache_dir(),
+            self.paths.runtime_dir(),
+        ] {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
         }
         MailIndex::create(&self.index_path())?;
         let config = Config {
@@ -260,10 +269,6 @@ impl Store {
             .admin_password
             .as_deref()
             .is_some_and(|stored| verify_password(password, stored))
-    }
-
-    pub fn runtime_dir(&self) -> PathBuf {
-        self.root.join("runtime")
     }
 
     // ---------------------------------------------------------------- roles
@@ -328,7 +333,7 @@ impl Store {
     // ---------------------------------------------------------------- pending
 
     fn pending_dir(&self) -> PathBuf {
-        self.runtime_dir().join("pending")
+        self.paths.pending_dir()
     }
 
     pub fn create_pending(&self, role: &str, session_id: &str, harness: &str) -> Result<Pending> {
@@ -385,20 +390,20 @@ impl Store {
     // ---------------------------------------------------------------- auth
 
     fn auth_path(&self, session_id: &str) -> PathBuf {
-        self.runtime_dir()
-            .join("auth")
+        self.paths
+            .auth_dir()
             .join(format!("{}.json", session_key(session_id)))
     }
 
     pub fn token_path(&self, session_id: &str) -> PathBuf {
-        self.runtime_dir()
-            .join("tokens")
+        self.paths
+            .tokens_dir()
             .join(format!("{}.tok", session_key(session_id)))
     }
 
     fn revoked_path(&self, session_id: &str) -> PathBuf {
-        self.runtime_dir()
-            .join("revoked")
+        self.paths
+            .revoked_dir()
             .join(format!("{}.json", session_key(session_id)))
     }
 
@@ -479,7 +484,7 @@ impl Store {
 
     pub fn revoke_role_sessions(&self, role_addr: &str) -> Result<()> {
         let mut sessions = Vec::new();
-        if let Ok(entries) = fs::read_dir(self.runtime_dir().join("auth")) {
+        if let Ok(entries) = fs::read_dir(self.paths.auth_dir()) {
             for entry in entries.flatten() {
                 if let Ok(auth) = read_json::<Auth>(&entry.path()) {
                     if auth.role == role_addr {
@@ -496,7 +501,7 @@ impl Store {
 
     pub fn revoke_all_sessions(&self) -> Result<()> {
         let mut sessions = Vec::new();
-        if let Ok(entries) = fs::read_dir(self.runtime_dir().join("auth")) {
+        if let Ok(entries) = fs::read_dir(self.paths.auth_dir()) {
             for entry in entries.flatten() {
                 if let Ok(auth) = read_json::<Auth>(&entry.path()) {
                     sessions.push(auth.session_id);
@@ -542,7 +547,7 @@ impl Store {
     // ---------------------------------------------------------------- mail paths
 
     pub fn mailbox_dir(&self, address: &str) -> PathBuf {
-        self.root.join("mail").join(address)
+        self.paths.mail_dir().join(address)
     }
 
     fn folder_dir(&self, address: &str, folder: &str) -> PathBuf {
@@ -907,7 +912,7 @@ impl Store {
     // ---------------------------------------------------------------- state
 
     fn state_dir(&self, message_id: &str) -> PathBuf {
-        self.root.join("state").join(message_id)
+        self.paths.markers_dir().join(message_id)
     }
 
     fn marker_times(&self, message_id: &str, kind: &str, role: &str) -> Vec<i64> {
@@ -978,7 +983,7 @@ impl Store {
         if !self.message_path(role, "new", message_id).exists() {
             bail!("message not in role mailbox: {message_id}");
         }
-        let dir = self.root.join("claims").join(message_id).join(role);
+        let dir = self.paths.claims_dir().join(message_id).join(role);
         match fs::create_dir_all(dir.parent().unwrap()) {
             Ok(()) => {}
             Err(err) => return Err(err).context("create claims dir"),
@@ -992,7 +997,7 @@ impl Store {
 
     pub fn release(&self, role: &str, message_id: &str) -> Result<bool> {
         ensure_message_id(message_id)?;
-        let dir = self.root.join("claims").join(message_id).join(role);
+        let dir = self.paths.claims_dir().join(message_id).join(role);
         match fs::remove_dir(&dir) {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -1001,7 +1006,7 @@ impl Store {
     }
 
     pub fn clear_claims_for(&self, role: &str) -> Result<()> {
-        let claims = self.root.join("claims");
+        let claims = self.paths.claims_dir();
         if !claims.exists() {
             return Ok(());
         }
@@ -1058,7 +1063,7 @@ impl Store {
     fn scan_thread(&self, role: &str, thread_or_message: &str) -> Result<Vec<MailEntry>> {
         let mut messages: std::collections::BTreeMap<String, (PathBuf, Envelope)> =
             std::collections::BTreeMap::new();
-        let mail_root = self.root.join("mail");
+        let mail_root = self.paths.mail_dir();
         if let Ok(roles) = fs::read_dir(&mail_root) {
             for role_entry in roles.flatten() {
                 for folder in ["new", "sent"] {
@@ -1113,8 +1118,8 @@ impl Store {
     pub fn wake_state(&self, role: &str) -> WakeState {
         read_json(
             &self
-                .runtime_dir()
-                .join("wake")
+                .paths
+                .wake_dir()
                 .join(format!("{}.json", role_key(role))),
         )
         .unwrap_or_default()
@@ -1123,8 +1128,8 @@ impl Store {
     pub fn save_wake_state(&self, role: &str, state: &WakeState) -> Result<()> {
         write_json_atomic(
             &self
-                .runtime_dir()
-                .join("wake")
+                .paths
+                .wake_dir()
                 .join(format!("{}.json", role_key(role))),
             state,
         )
@@ -1132,8 +1137,8 @@ impl Store {
 
     pub fn log_wake(&self, role: &str, line: &str) {
         let path = self
-            .runtime_dir()
-            .join("wake")
+            .paths
+            .wake_dir()
             .join(format!("{}.log", role_key(role)));
         if let Ok(mut file) = fs::OpenOptions::new()
             .create(true)
@@ -1146,8 +1151,8 @@ impl Store {
     }
 
     fn wake_failure_path(&self, role: &str) -> PathBuf {
-        self.runtime_dir()
-            .join("wake")
+        self.paths
+            .wake_dir()
             .join(format!("{}.failed.json", role_key(role)))
     }
 
@@ -1175,16 +1180,11 @@ impl Store {
     pub fn clear_role_runtime(&self, role: &str) {
         let name = role_key(role);
         for suffix in ["json", "log", "failed.json"] {
-            fs::remove_file(
-                self.runtime_dir()
-                    .join("wake")
-                    .join(format!("{name}.{suffix}")),
-            )
-            .ok();
+            fs::remove_file(self.paths.wake_dir().join(format!("{name}.{suffix}"))).ok();
         }
         fs::remove_file(
-            self.runtime_dir()
-                .join("hook")
+            self.paths
+                .hook_dir()
                 .join(format!("{}.json", role.replace('@', "_at_"))),
         )
         .ok();
@@ -1212,7 +1212,7 @@ impl Store {
         let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut message_count = 0usize;
 
-        if let Ok(role_dirs) = fs::read_dir(self.root.join("mail")) {
+        if let Ok(role_dirs) = fs::read_dir(self.paths.mail_dir()) {
             for role_entry in role_dirs.flatten() {
                 let role_path = role_entry.path();
                 if !role_path.is_dir() {
@@ -1282,7 +1282,7 @@ impl Store {
             });
         }
 
-        if let Ok(entries) = fs::read_dir(self.runtime_dir().join("wake")) {
+        if let Ok(entries) = fs::read_dir(self.paths.wake_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("json")
@@ -1345,12 +1345,12 @@ impl Store {
 
         for (dir, code, label) in [
             (
-                self.root.join("state"),
+                self.paths.markers_dir(),
                 "orphan_state",
                 "markers for a missing message",
             ),
             (
-                self.root.join("claims"),
+                self.paths.claims_dir(),
                 "orphan_claim",
                 "claim for a missing message",
             ),
@@ -1388,7 +1388,7 @@ impl Store {
         let mut mailboxes = 0usize;
         let mut messages = 0usize;
         let mut indexed = 0usize;
-        if let Ok(roles) = fs::read_dir(self.root.join("mail")) {
+        if let Ok(roles) = fs::read_dir(self.paths.mail_dir()) {
             for role_entry in roles.flatten() {
                 if !role_entry.path().is_dir() {
                     continue;

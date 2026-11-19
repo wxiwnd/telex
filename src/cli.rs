@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::client::Client;
 use crate::domain::{Address, Body, Envelope, Intent, MediaType};
+use crate::paths::Paths;
 use crate::store::Store;
 
 #[derive(Parser)]
@@ -336,7 +337,7 @@ struct MaildArgs {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let home = home();
+    let home = Paths::from_env()?;
     match cli.command {
         Commands::Init(args) => init(&home, args),
         Commands::Whoami => whoami(&home),
@@ -381,14 +382,6 @@ pub fn run() -> Result<()> {
     }
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("TELEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".telex")
-        })
-}
-
 fn session_id() -> Option<String> {
     Store::session_id_from_env()
 }
@@ -405,8 +398,8 @@ fn harness() -> String {
     }
 }
 
-fn rpc(home: &PathBuf, method: &str, mut params: Value) -> Result<Value> {
-    let store = Store::new(home);
+fn rpc(home: &Paths, method: &str, mut params: Value) -> Result<Value> {
+    let store = Store::new(home.clone());
     let session = session_id();
     if let Some(session) = &session {
         params["session_id"] = json!(session);
@@ -414,14 +407,14 @@ fn rpc(home: &PathBuf, method: &str, mut params: Value) -> Result<Value> {
     let token = session
         .as_ref()
         .and_then(|session| store.read_token_file(session));
-    Client::new(home)
+    Client::new(home.clone())
         .call(method, token.as_deref(), params)
         .map_err(|err| anyhow!("{}: {}", err.code, err.message))
 }
 
-fn rpc_admin(home: &PathBuf, method: &str, mut params: Value, password: &str) -> Result<Value> {
+fn rpc_admin(home: &Paths, method: &str, mut params: Value, password: &str) -> Result<Value> {
     params["password"] = json!(password);
-    let client = Client::new(home);
+    let client = Client::new(home.clone());
     client
         .call(method, None, params)
         .map_err(|err| anyhow!("{}: {}", err.code, err.message))
@@ -441,10 +434,10 @@ fn read_password(password_stdin: bool) -> Result<String> {
     }
 }
 
-fn init(home: &PathBuf, args: InitArgs) -> Result<()> {
-    let store = Store::new(home);
+fn init(home: &Paths, args: InitArgs) -> Result<()> {
+    let store = Store::new(home.clone());
     if store.config_path().exists() {
-        bail!("already initialized: {}", home.display());
+        bail!("already initialized: {}", home.data_dir().display());
     }
     let password = read_password(args.password_stdin)?;
     if password.chars().count() < 12 {
@@ -453,12 +446,12 @@ fn init(home: &PathBuf, args: InitArgs) -> Result<()> {
     let domain = args.domain.to_ascii_lowercase();
     Address::parse("probe", &domain).context("invalid domain")?;
     store.init(&password, &domain)?;
-    println!("initialized {}", home.display());
+    println!("initialized {}", home.data_dir().display());
     println!("next: tlx role add <address> --password-stdin, then tlx login <role>");
     Ok(())
 }
 
-fn whoami(home: &PathBuf) -> Result<()> {
+fn whoami(home: &Paths) -> Result<()> {
     let session = session_id();
     match rpc(home, "whoami", json!({})) {
         Ok(value) => println!("{}", serde_json::to_string_pretty(&value)?),
@@ -474,7 +467,7 @@ fn whoami(home: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn role(home: &PathBuf, cmd: RoleCmd) -> Result<()> {
+fn role(home: &Paths, cmd: RoleCmd) -> Result<()> {
     match cmd.command {
         RoleSub::Add(args) => {
             let password = read_password(args.password_stdin)?;
@@ -524,9 +517,9 @@ fn role(home: &PathBuf, cmd: RoleCmd) -> Result<()> {
     Ok(())
 }
 
-fn login(home: &PathBuf, args: LoginArgs) -> Result<()> {
+fn login(home: &Paths, args: LoginArgs) -> Result<()> {
     let session = session_id().ok_or_else(|| anyhow!("no session id in environment"))?;
-    let domain = Store::new(home).config().domain;
+    let domain = Store::new(home.clone()).config().domain;
     let role = Address::parse(&args.role, &domain)?.to_string();
     let value = rpc(
         home,
@@ -538,18 +531,18 @@ fn login(home: &PathBuf, args: LoginArgs) -> Result<()> {
     Ok(())
 }
 
-fn approve(home: &PathBuf, args: ApproveArgs) -> Result<()> {
+fn approve(home: &Paths, args: ApproveArgs) -> Result<()> {
     let password = read_password(args.password_stdin)?;
     let value = rpc_admin(home, "approve", json!({"code": args.code}), &password)?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 
-fn admin(home: &PathBuf, cmd: AdminCmd) -> Result<()> {
+fn admin(home: &Paths, cmd: AdminCmd) -> Result<()> {
     match cmd.command {
         AdminSub::Assign(args) => {
             let password = read_password(args.password_stdin)?;
-            let domain = Store::new(home).config().domain;
+            let domain = Store::new(home.clone()).config().domain;
             let role = Address::parse(&args.role, &domain)?.to_string();
             let value = rpc_admin(
                 home,
@@ -577,7 +570,7 @@ fn admin(home: &PathBuf, cmd: AdminCmd) -> Result<()> {
         }
         AdminSub::Send(args) => {
             let password = read_password(args.password_stdin)?;
-            let domain = Store::new(home).config().domain;
+            let domain = Store::new(home.clone()).config().domain;
             let from = Address::parse(&args.from, &domain)?;
             let envelope = build_envelope(from, &domain, &args.send)?;
             let value = rpc_admin(
@@ -611,7 +604,7 @@ fn admin(home: &PathBuf, cmd: AdminCmd) -> Result<()> {
     Ok(())
 }
 
-fn logout(home: &PathBuf) -> Result<()> {
+fn logout(home: &Paths) -> Result<()> {
     let value = rpc(home, "logout", json!({}))?;
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
@@ -658,7 +651,7 @@ fn read_body(body: Option<String>, body_file: Option<PathBuf>) -> Result<String>
     Ok(buffer)
 }
 
-fn current_role(home: &PathBuf) -> Result<Address> {
+fn current_role(home: &Paths) -> Result<Address> {
     let value = rpc(home, "whoami", json!({}))?;
     let role = value["role"]
         .as_str()
@@ -730,16 +723,16 @@ fn print_send_result(value: &Value, json_output: bool) {
     }
 }
 
-fn send(home: &PathBuf, args: SendArgs) -> Result<()> {
+fn send(home: &Paths, args: SendArgs) -> Result<()> {
     let from = current_role(home)?;
-    let domain = Store::new(home).config().domain;
+    let domain = Store::new(home.clone()).config().domain;
     let envelope = build_envelope(from, &domain, &args)?;
     let value = rpc(home, "mail.send", json!({"envelope": envelope}))?;
     print_send_result(&value, args.json);
     Ok(())
 }
 
-fn reply(home: &PathBuf, args: ReplyArgs) -> Result<()> {
+fn reply(home: &Paths, args: ReplyArgs) -> Result<()> {
     let from = current_role(home)?;
     let parent_value = rpc(
         home,
@@ -782,7 +775,7 @@ fn reply(home: &PathBuf, args: ReplyArgs) -> Result<()> {
     Ok(())
 }
 
-fn list_folder(home: &PathBuf, folder: &str, args: InboxArgs) -> Result<()> {
+fn list_folder(home: &Paths, folder: &str, args: InboxArgs) -> Result<()> {
     let value = rpc(home, "mail.list", json!({"folder": folder}))?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -870,7 +863,7 @@ fn list_folder(home: &PathBuf, folder: &str, args: InboxArgs) -> Result<()> {
     Ok(())
 }
 
-fn read(home: &PathBuf, args: ReadArgs) -> Result<()> {
+fn read(home: &Paths, args: ReadArgs) -> Result<()> {
     let value = rpc(
         home,
         "mail.read",
@@ -937,7 +930,7 @@ fn terminal_text(value: &str) -> String {
     out
 }
 
-fn thread(home: &PathBuf, args: ThreadArgs) -> Result<()> {
+fn thread(home: &Paths, args: ThreadArgs) -> Result<()> {
     let value = rpc(home, "mail.thread", json!({"thread_id": args.thread_id}))?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -955,7 +948,7 @@ fn thread(home: &PathBuf, args: ThreadArgs) -> Result<()> {
     Ok(())
 }
 
-fn simple_rpc(home: &PathBuf, method: &str, params: Value, json_output: bool) -> Result<()> {
+fn simple_rpc(home: &Paths, method: &str, params: Value, json_output: bool) -> Result<()> {
     let value = rpc(home, method, params)?;
     if json_output {
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -965,7 +958,7 @@ fn simple_rpc(home: &PathBuf, method: &str, params: Value, json_output: bool) ->
     Ok(())
 }
 
-fn wake(home: &PathBuf, args: WakeArgs) -> Result<()> {
+fn wake(home: &Paths, args: WakeArgs) -> Result<()> {
     let role = match args.role {
         Some(role) => role,
         None => {
@@ -1028,12 +1021,12 @@ fn hook_session(payload: &Value) -> Option<String> {
 /// Compute what the hook should print for one payload. Shared by the stdin
 /// entry point and `tlx connect --test`, so the fixture path exercises the same
 /// code as a real harness invocation.
-fn evaluate_hook(home: &Path, payload: &Value, event: &str) -> HookOutcome {
+fn evaluate_hook(home: &Paths, payload: &Value, event: &str) -> HookOutcome {
     let kind = hook_event_kind(event);
     let Some(session) = hook_session(payload) else {
         return HookOutcome::empty();
     };
-    let store = Store::new(home);
+    let store = Store::new(home.clone());
     if !store.config_path().exists() {
         return HookOutcome::empty();
     }
@@ -1052,7 +1045,7 @@ fn evaluate_hook(home: &Path, payload: &Value, event: &str) -> HookOutcome {
         return HookOutcome::empty();
     };
     let Ok(value) =
-        Client::new(home).call("mail.unread", Some(&token), json!({"session_id": session}))
+        Client::new(home.clone()).call("mail.unread", Some(&token), json!({"session_id": session}))
     else {
         return HookOutcome::empty();
     };
@@ -1081,7 +1074,7 @@ fn evaluate_hook(home: &Path, payload: &Value, event: &str) -> HookOutcome {
     }
 }
 
-fn hook(home: &Path, args: HookArgs) -> Result<()> {
+fn hook(home: &Paths, args: HookArgs) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok();
     let payload: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
@@ -1100,7 +1093,7 @@ fn hook(home: &Path, args: HookArgs) -> Result<()> {
     Ok(())
 }
 
-fn connect(home: &Path, args: ConnectArgs) -> Result<()> {
+fn connect(home: &Paths, args: ConnectArgs) -> Result<()> {
     let Some(raw_harness) = args.harness.as_deref() else {
         if args.write || args.test {
             bail!("name a harness: claude, codex, or dsh");
@@ -1131,7 +1124,7 @@ fn connect(home: &Path, args: ConnectArgs) -> Result<()> {
     Ok(())
 }
 
-fn connect_test(home: &Path, harness: &str) {
+fn connect_test(home: &Paths, harness: &str) {
     let session = format!("tlx-connect-test-{harness}");
     let payload = json!({
         "session_id": session,
@@ -1241,7 +1234,7 @@ fn describe_hook_config(status: &HookConfigStatus) -> String {
     }
 }
 
-fn connect_status(home: &Path, json_output: bool) -> Result<()> {
+fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
     let user_home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
     let codex_home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -1250,8 +1243,10 @@ fn connect_status(home: &Path, json_output: bool) -> Result<()> {
     let codex = read_hook_config_status("codex", &codex_home.join("hooks.json"));
     let dsh_skill_path = user_home.join(".dsh/skills/telex/SKILL.md");
     let dsh_installed = dsh_skill_path.exists();
-    let maild_ok = Client::new(home).call("hello", None, json!({})).is_ok();
-    let initialized = Store::new(home).config_path().exists();
+    let maild_ok = Client::new(home.clone())
+        .call("hello", None, json!({}))
+        .is_ok();
+    let initialized = Store::new(home.clone()).config_path().exists();
 
     if json_output {
         let value = json!({
@@ -1290,8 +1285,8 @@ fn connect_status(home: &Path, json_output: bool) -> Result<()> {
     }
     println!("maild: {}", if maild_ok { "运行中" } else { "未运行" });
     println!(
-        "telex home: {}{}",
-        home.display(),
+        "telex data: {}{}",
+        home.data_dir().display(),
         if initialized {
             ""
         } else {
@@ -1303,8 +1298,8 @@ fn connect_status(home: &Path, json_output: bool) -> Result<()> {
 
 fn hook_budget(store: &Store, role: &str, _count: u64) -> bool {
     let path = store
-        .runtime_dir()
-        .join("hook")
+        .paths()
+        .hook_dir()
         .join(format!("{}.json", role.replace('@', "_at_")));
     let now = Utc::now().timestamp_millis();
     let mut stops: Vec<i64> = std::fs::read_to_string(&path)
@@ -1495,7 +1490,7 @@ fn agents_md(args: AgentsMdArgs) -> Result<()> {
     Ok(())
 }
 
-fn inbox_line(home: &PathBuf, args: InboxLineArgs) -> Result<()> {
+fn inbox_line(home: &Paths, args: InboxLineArgs) -> Result<()> {
     let value = rpc(home, "mail.unread", json!({}))?;
     let count = value["count"].as_u64().unwrap_or(0);
     let role = value["role"].as_str().unwrap_or("");
@@ -1509,7 +1504,7 @@ fn inbox_line(home: &PathBuf, args: InboxLineArgs) -> Result<()> {
     Ok(())
 }
 
-fn inbox_file(home: &PathBuf, args: InboxFileArgs) -> Result<()> {
+fn inbox_file(home: &Paths, args: InboxFileArgs) -> Result<()> {
     let value = rpc(home, "mail.list", json!({"folder": "new"}))?;
     let messages = value["messages"].as_array().cloned().unwrap_or_default();
     let role = current_role(home)?.to_string();
@@ -1541,7 +1536,7 @@ fn inbox_file(home: &PathBuf, args: InboxFileArgs) -> Result<()> {
     Ok(())
 }
 
-fn doctor(home: &PathBuf, args: DoctorArgs) -> Result<()> {
+fn doctor(home: &Paths, args: DoctorArgs) -> Result<()> {
     let value = if args.password_stdin {
         let password = read_password(true)?;
         rpc_admin(home, "doctor", json!({}), &password)?
@@ -1567,7 +1562,7 @@ fn doctor(home: &PathBuf, args: DoctorArgs) -> Result<()> {
     Ok(())
 }
 
-fn index(home: &PathBuf, cmd: IndexCmd) -> Result<()> {
+fn index(home: &Paths, cmd: IndexCmd) -> Result<()> {
     match cmd.command {
         IndexSub::Rebuild => {
             let password = read_password(false)?;
