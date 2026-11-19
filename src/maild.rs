@@ -24,10 +24,10 @@ pub fn run(paths: Paths) -> Result<()> {
         bail!("not initialized: run `tlx init` first");
     }
     store.load_config().context("read config.json")?;
-    let run_dir = store.run_dir();
+    let run_dir = store.paths().runtime_dir().to_path_buf();
     std::fs::create_dir_all(&run_dir)?;
 
-    let socket_path = store.socket_path();
+    let socket_path = store.paths().socket_path();
     if UnixStream::connect(&socket_path).is_ok() {
         bail!("another maild is already running for this Telex home");
     }
