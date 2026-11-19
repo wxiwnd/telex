@@ -185,18 +185,6 @@ impl Store {
         self.paths.seats_dir()
     }
 
-    pub fn run_dir(&self) -> PathBuf {
-        self.paths.runtime_dir().to_path_buf()
-    }
-
-    pub fn socket_path(&self) -> PathBuf {
-        self.paths.socket_path()
-    }
-
-    pub fn lock_path(&self) -> PathBuf {
-        self.paths.lock_path()
-    }
-
     pub fn init(&self, admin_password: &str, domain: &str) -> Result<()> {
         if admin_password.chars().count() < 12 {
             bail!("admin password must be at least 12 characters");

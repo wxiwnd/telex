@@ -40,17 +40,17 @@ TELEX_SESSION_ID=worker-1 ./target/release/tlx login worker@local
 
 ## 数据位置
 
-所有路径遵循 XDG Base Directory 规范：
+路径按 XDG Base Directory 规范拆开：
 
 | 内容 | 路径 |
 |---|---|
 | 配置 | `~/.config/telex/config.json` |
-| 角色、邮件、已读/回执 marker | `~/.local/share/telex/` |
-| 登录、token、待批申请、claim、唤醒记录 | `~/.local/state/telex/` |
+| 角色、邮件、已读/回执标记 | `~/.local/share/telex/` |
+| 登录、token、待批申请、认领、唤醒记录 | `~/.local/state/telex/` |
 | SQLite 索引 | `~/.cache/telex/index.sqlite3` |
-| socket、锁 | `$XDG_RUNTIME_DIR/telex/` |
+| socket 和锁文件 | `$XDG_RUNTIME_DIR/telex/` |
 
-`XDG_RUNTIME_DIR` 未设置时回退到 `~/.local/state/telex/run/`。`XDG_CONFIG_HOME` 等变量存在时优先使用；相对路径会被忽略。
+`XDG_RUNTIME_DIR` 未设置时回退到 `~/.local/state/telex/run/`。其他 XDG 变量为空或是相对路径时使用默认值。
 
 ## 设计
 整体架构如下图所示：
