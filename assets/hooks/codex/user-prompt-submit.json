@@ -1,0 +1,13 @@
+{
+  "hooks": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{TLX}} hook --event UserPromptSubmit --harness codex",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

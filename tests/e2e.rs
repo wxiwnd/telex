@@ -360,6 +360,8 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
             "connect",
             "claude",
             "--write",
+            "--events",
+            "SessionStart,UserPromptSubmit,Stop",
             "--file",
             settings.to_str().unwrap(),
         ],
@@ -369,12 +371,15 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
     let value: Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("json");
     assert_eq!(value["model"], "keep-me");
-    assert!(
-        !value["hooks"]["SessionStart"]
-            .as_array()
-            .expect("hooks")
-            .is_empty()
-    );
+    for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+        let command = value["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            command.contains(&format!("hook --event {event} --harness claude")),
+            "{event}: {command}"
+        );
+    }
 
     let out = run(
         &home,
@@ -383,6 +388,8 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
             "connect",
             "claude",
             "--write",
+            "--events",
+            "SessionStart,UserPromptSubmit,Stop",
             "--file",
             settings.to_str().unwrap(),
         ],
@@ -781,6 +788,8 @@ fn connect_codex_writes_and_merges_idempotently() {
             "connect",
             "codex",
             "--write",
+            "--events",
+            "SessionStart,Stop",
             "--file",
             file.to_str().unwrap(),
         ],
@@ -821,6 +830,21 @@ fn connect_codex_writes_and_merges_idempotently() {
             .contains("hook --event SessionStart --harness codex")
     );
 
+    let stop_telex = value["hooks"]["Stop"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|group| group["hooks"].as_array())
+        .flatten()
+        .find(|handler| {
+            handler["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("hook --event Stop")
+        })
+        .expect("stop handler");
+    assert_eq!(stop_telex["timeout"], 30);
+
     // Second run is idempotent.
     let out = run(
         &home,
@@ -829,6 +853,8 @@ fn connect_codex_writes_and_merges_idempotently() {
             "connect",
             "codex",
             "--write",
+            "--events",
+            "SessionStart,Stop",
             "--file",
             file.to_str().unwrap(),
         ],
