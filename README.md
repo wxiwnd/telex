@@ -50,7 +50,7 @@ TELEX_SESSION_ID=worker-1 ./target/release/tlx login worker@local
 | SQLite 索引 | `~/.cache/telex/index.sqlite3` |
 | socket 和锁文件 | `$XDG_RUNTIME_DIR/telex/` |
 
-`XDG_RUNTIME_DIR` 未设置时回退到 `~/.local/state/telex/run/`。其他 XDG 变量为空或是相对路径时使用默认值。
+如果未设置 XDG Base Directory 变量值，会使用默认值。
 
 ## 设计
 整体架构如下图所示：
