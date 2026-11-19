@@ -1030,18 +1030,10 @@ fn evaluate_hook(home: &Paths, payload: &Value, event: &str) -> HookOutcome {
     if !store.config_path().exists() {
         return HookOutcome::empty();
     }
+    // A hook is inert until the session has been explicitly joined and the
+    // admin has approved it. Pending logins and unrelated harness sessions
+    // both have no token file, so they stay silent.
     let Some(token) = store.read_token_file(&session) else {
-        // The agent cannot see the harness session id in its own shell, so
-        // the hook is the only place that can teach it. Only on SessionStart;
-        // UserPromptSubmit would repeat this on every prompt.
-        if matches!(kind, HookEventKind::SessionStart) {
-            return HookOutcome {
-                stdout: vec![format!(
-                    "[Telex] 会话 {session} 未绑定角色。要收信：TELEX_SESSION_ID={session} tlx login <角色>，然后请管理员 tlx approve <配对码>。"
-                )],
-                stop_stderr: None,
-            };
-        }
         return HookOutcome::empty();
     };
     let Ok(value) =
