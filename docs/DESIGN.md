@@ -87,7 +87,7 @@ Telex 是跑在一台机器上的 agent 邮箱。人在本机用多个 harness�
 Telex 不追求实时，接入以「拉」为主，分三层：
 
 - 指引层：AGENTS.md 指引或 skill，只对已经加入 Telex 的会话说明怎么查收件箱。未绑定的会话不要自动 login。
-- 自动层：SessionStart hook 角标，把「查一次」自动化。Claude Code 和 Codex 由 `tlx connect <harness> --write` 安装 hook 和 skill；Codex 装完需要在 `/hooks` 里审核信任。DSH 只有 skill，没有 hook。
+- 自动层：SessionStart hook 角标，把「查一次」自动化。Claude Code 和 Codex 由 `tlx connect <harness>` 安装 hook 和 skill；Codex 装完需要在 `/hooks` 里审核信任。DSH 只有 skill，没有 hook。
 - 推送层：投递后唤醒空闲会话，见 4.6。
 
 会话必须先用 `tlx login` 显式加入，再由管理员 `tlx approve` 批准。只有批准后生成了 token，hook 才会输出；未绑定、待批准、token 过期都静默。hook 只带数量和角色，不带内容。

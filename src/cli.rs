@@ -290,18 +290,15 @@ struct HookArgs {
 struct ConnectArgs {
     /// claude, codex, or dsh. Omit to show connection status.
     harness: Option<String>,
-    /// Write the configuration instead of printing it.
-    #[arg(long)]
-    write: bool,
     /// Hook events for Claude Code and Codex, comma separated.
     #[arg(long, default_value = "SessionStart")]
     events: String,
-    /// Override the config file.
+    /// Override the hook config file for Claude Code or Codex.
     #[arg(long)]
     file: Option<PathBuf>,
-    /// Override the skill file when installing a skill.
-    #[arg(long)]
-    skill_file: Option<PathBuf>,
+    /// Install without asking for confirmation.
+    #[arg(long, short = 'y')]
+    yes: bool,
     /// Run a synthetic SessionStart payload after connecting.
     #[arg(long)]
     test: bool,
@@ -574,7 +571,7 @@ fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
         println!("domain: {domain}");
         println!("role: {}", role.address);
         println!("next:");
-        println!("  tlx connect claude --write");
+        println!("  tlx connect claude");
         println!("  tlx role add worker@local --password-stdin");
         println!(
             "  在 harness 会话里运行 tlx login {}，再在终端运行 tlx approve <配对码>",
@@ -1233,38 +1230,101 @@ fn hook(home: &Paths, args: HookArgs) -> Result<()> {
     Ok(())
 }
 
+fn user_home() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+}
+
+fn default_hook_path(harness: &str) -> Result<PathBuf> {
+    let home = user_home();
+    match harness {
+        "claude" => Ok(home.join(".claude/settings.json")),
+        "codex" => Ok(std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"))
+            .join("hooks.json")),
+        other => bail!("{other} has no hook config"),
+    }
+}
+
+fn skill_path(harness: &str) -> PathBuf {
+    let home = user_home();
+    match harness {
+        "claude" => home.join(".claude/skills/telex/SKILL.md"),
+        "codex" => std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"))
+            .join("skills/telex/SKILL.md"),
+        _ => home.join(".dsh/skills/telex/SKILL.md"),
+    }
+}
+
 fn connect(home: &Paths, args: ConnectArgs) -> Result<()> {
     let Some(raw_harness) = args.harness.as_deref() else {
-        if args.write || args.test {
+        if args.test {
             bail!("name a harness: claude, codex, or dsh");
         }
         return connect_status(home, args.json);
     };
     let harness = raw_harness.to_ascii_lowercase();
-    match harness.as_str() {
+    let (hook_path, skill) = match harness.as_str() {
         "claude" | "codex" => {
-            if args.write || !args.test {
-                connect_hook(&harness, &args)?;
-            }
-            if args.write {
-                install_skill(&harness, &args)?;
-            }
-            if args.test {
-                connect_test(home, &harness);
-            }
+            let hook = args
+                .file
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| default_hook_path(&harness))?;
+            (Some(hook), skill_path(&harness))
         }
         "dsh" => {
+            if args.file.is_some() {
+                bail!("dsh has no hook config; --file is not supported");
+            }
             if args.events != "SessionStart" {
                 bail!("dsh uses a skill, not hook events");
             }
             if args.test {
                 bail!("--test applies to claude and codex hooks, not the dsh skill");
             }
-            install_skill("dsh", &args)?;
+            (None, skill_path("dsh"))
         }
         other => bail!("unknown harness: {other}. Use claude, codex, or dsh"),
+    };
+
+    if !confirm_connect(hook_path.as_deref(), &skill, &args.events, args.yes)? {
+        println!("cancelled");
+        return Ok(());
+    }
+
+    if let Some(hook) = &hook_path {
+        install_hook(&harness, hook, &args.events)?;
+    }
+    install_skill(&harness)?;
+    if args.test {
+        connect_test(home, &harness);
     }
     Ok(())
+}
+
+fn confirm_connect(hook: Option<&Path>, skill: &Path, events: &str, yes: bool) -> Result<bool> {
+    println!("will:");
+    if let Some(hook) = hook {
+        println!("  hook:  {} (events: {events})", hook.display());
+    }
+    println!("  skill: {}", skill.display());
+    if yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!("confirmation required; pass --yes");
+    }
+    print!("continue? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn connect_test(home: &Paths, harness: &str) {
@@ -1357,7 +1417,7 @@ fn extract_command_binary(command: &str) -> Option<String> {
 fn describe_hook_config(status: &HookConfigStatus) -> String {
     if !status.path.exists() || !status.installed {
         format!(
-            "{}: {}（未安装，运行 tlx connect {} --write）",
+            "{}: {}（未安装，运行 tlx connect {}）",
             status.name,
             status.path.display(),
             status.name
@@ -1382,22 +1442,18 @@ fn describe_skill_status(harness: &str, path: &Path, installed: bool) {
         println!("{harness} skill: {}（已安装）", path.display());
     } else {
         println!(
-            "{harness} skill: {}（未安装，运行 tlx connect {harness} --write）",
+            "{harness} skill: {}（未安装，运行 tlx connect {harness}）",
             path.display()
         );
     }
 }
 
 fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
-    let user_home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
-    let codex_home = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| user_home.join(".codex"));
-    let claude = read_hook_config_status("claude", &user_home.join(".claude/settings.json"));
-    let codex = read_hook_config_status("codex", &codex_home.join("hooks.json"));
-    let claude_skill = user_home.join(".claude/skills/telex/SKILL.md");
-    let codex_skill = codex_home.join("skills/telex/SKILL.md");
-    let dsh_skill = user_home.join(".dsh/skills/telex/SKILL.md");
+    let claude = read_hook_config_status("claude", &default_hook_path("claude")?);
+    let codex = read_hook_config_status("codex", &default_hook_path("codex")?);
+    let claude_skill = skill_path("claude");
+    let codex_skill = skill_path("codex");
+    let dsh_skill = skill_path("dsh");
     let claude_skill_installed = claude_skill.exists();
     let codex_skill_installed = codex_skill.exists();
     let dsh_skill_installed = dsh_skill.exists();
@@ -1482,18 +1538,9 @@ fn hook_command_path() -> String {
         .unwrap_or_else(|_| "tlx".to_string())
 }
 
-fn connect_hook(harness: &str, args: &ConnectArgs) -> Result<()> {
-    let user_home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
-    let default_file = match harness {
-        "claude" => user_home.join(".claude/settings.json"),
-        _ => std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| user_home.join(".codex"))
-            .join("hooks.json"),
-    };
+fn install_hook(harness: &str, file: &Path, events: &str) -> Result<()> {
     let mut hooks = serde_json::Map::new();
-    for event in args
-        .events
+    for event in events
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -1505,13 +1552,11 @@ fn connect_hook(harness: &str, args: &ConnectArgs) -> Result<()> {
             .ok_or_else(|| anyhow!("hook template for {event} has no hooks array"))?;
         hooks.insert(event.to_string(), items);
     }
-    let settings = json!({"hooks": hooks});
-    if !args.write {
-        println!("{}", serde_json::to_string_pretty(&settings)?);
-        return Ok(());
+    if hooks.is_empty() {
+        bail!("no hook events selected");
     }
-    let file = args.file.clone().unwrap_or(default_file);
-    let mut doc: Value = std::fs::read_to_string(&file)
+    let settings = json!({"hooks": hooks});
+    let mut doc: Value = std::fs::read_to_string(file)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| json!({}));
@@ -1519,7 +1564,7 @@ fn connect_hook(harness: &str, args: &ConnectArgs) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     if file.exists() {
-        std::fs::write(file.with_extension("json.bak"), std::fs::read(&file)?).ok();
+        std::fs::write(file.with_extension("json.bak"), std::fs::read(file)?).ok();
     }
     let object = doc
         .as_object_mut()
@@ -1540,8 +1585,8 @@ fn connect_hook(harness: &str, args: &ConnectArgs) -> Result<()> {
             entries.extend(items.clone());
         }
     }
-    std::fs::write(&file, serde_json::to_string_pretty(&doc)? + "\n")?;
-    println!("connected {harness}: {}", file.display());
+    std::fs::write(file, serde_json::to_string_pretty(&doc)? + "\n")?;
+    println!("hook: {}", file.display());
     if harness == "codex" {
         println!("启动 codex 后运行 /hooks 审核并信任 Telex 的 hook，否则不会执行。");
     }
@@ -1592,29 +1637,11 @@ fn replace_placeholder(value: &mut Value, needle: &str, replacement: &str) {
 
 const TELEX_SKILL: &str = include_str!("../assets/skills/telex/SKILL.md");
 
-/// Install or print the Telex skill for a harness.
-///
-/// `claude` and `codex` read skills from `~/.claude/skills/` and
-/// `~/.codex/skills/` respectively.  `dsh` uses its own convention.
-fn install_skill(harness: &str, args: &ConnectArgs) -> Result<()> {
-    if !args.write {
-        print!("{TELEX_SKILL}");
-        return Ok(());
-    }
-    let user_home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
-    let default_dir = match harness {
-        "claude" => user_home.join(".claude").join("skills"),
-        "codex" => std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| user_home.join(".codex"))
-            .join("skills"),
-        _ => user_home.join(".dsh").join("skills"),
-    };
-    let target = args
-        .skill_file
-        .clone()
-        .unwrap_or_else(|| default_dir.join("telex").join("SKILL.md"));
-    write_skill(&target)
+fn install_skill(harness: &str) -> Result<()> {
+    let target = skill_path(harness);
+    write_skill(&target)?;
+    println!("重启 {harness} 会话后生效。");
+    Ok(())
 }
 
 fn write_skill(target: &std::path::Path) -> Result<()> {

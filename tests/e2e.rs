@@ -96,6 +96,7 @@ fn run(home: &Path, session: Option<&str>, args: &[&str], input: Option<&str>) -
     let mut command = Command::new(bin());
     command
         .args(args)
+        .env("HOME", home)
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("DSH_SESSION_ID")
@@ -352,7 +353,7 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
         r#"{"model":"keep-me","hooks":{"SessionStart":[]}}"#,
     )
     .expect("settings");
-    let skill_file = dir.path().join("claude-skill").join("SKILL.md");
+    let skill_file = home.join(".claude/skills/telex/SKILL.md");
 
     let out = run(
         &home,
@@ -360,13 +361,11 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
         &[
             "connect",
             "claude",
-            "--write",
+            "--yes",
             "--events",
             "SessionStart,UserPromptSubmit,Stop",
             "--file",
             settings.to_str().unwrap(),
-            "--skill-file",
-            skill_file.to_str().unwrap(),
         ],
         None,
     );
@@ -384,8 +383,14 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
         );
     }
     let skill_text = std::fs::read_to_string(&skill_file).expect("skill file");
-    assert!(skill_text.contains("name: telex"), "frontmatter: {skill_text}");
-    assert!(skill_text.contains("tlx inbox-line"), "instruction: {skill_text}");
+    assert!(
+        skill_text.contains("name: telex"),
+        "frontmatter: {skill_text}"
+    );
+    assert!(
+        skill_text.contains("tlx inbox-line"),
+        "instruction: {skill_text}"
+    );
 
     let out = run(
         &home,
@@ -393,13 +398,11 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
         &[
             "connect",
             "claude",
-            "--write",
+            "--yes",
             "--events",
             "SessionStart,UserPromptSubmit,Stop",
             "--file",
             settings.to_str().unwrap(),
-            "--skill-file",
-            skill_file.to_str().unwrap(),
         ],
         None,
     );
@@ -819,7 +822,7 @@ fn connect_codex_writes_and_merges_idempotently() {
         r#"{"description":"keep me","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/bin/true"}]}]}}"#,
     )
     .expect("seed");
-    let skill_file = dir.path().join("codex-skill").join("SKILL.md");
+    let skill_file = home.join(".codex/skills/telex/SKILL.md");
 
     let out = run(
         &home,
@@ -827,13 +830,11 @@ fn connect_codex_writes_and_merges_idempotently() {
         &[
             "connect",
             "codex",
-            "--write",
+            "--yes",
             "--events",
             "SessionStart,Stop",
             "--file",
             file.to_str().unwrap(),
-            "--skill-file",
-            skill_file.to_str().unwrap(),
         ],
         None,
     );
@@ -844,7 +845,10 @@ fn connect_codex_writes_and_merges_idempotently() {
         stdout(&out)
     );
     let skill_text = std::fs::read_to_string(&skill_file).expect("skill file");
-    assert!(skill_text.contains("name: telex"), "frontmatter: {skill_text}");
+    assert!(
+        skill_text.contains("name: telex"),
+        "frontmatter: {skill_text}"
+    );
 
     let value: Value =
         serde_json::from_str(&std::fs::read_to_string(&file).expect("read")).expect("json");
@@ -896,13 +900,11 @@ fn connect_codex_writes_and_merges_idempotently() {
         &[
             "connect",
             "codex",
-            "--write",
+            "--yes",
             "--events",
             "SessionStart,Stop",
             "--file",
             file.to_str().unwrap(),
-            "--skill-file",
-            skill_file.to_str().unwrap(),
         ],
         None,
     );
@@ -928,18 +930,9 @@ fn connect_dsh_writes_idempotently() {
     let dir = TempDir::new().expect("temp");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home");
-    let skills = dir.path().join("skills");
+    let target = home.join(".dsh/skills/telex/SKILL.md");
 
-    let target = skills.join("telex").join("SKILL.md");
-    let owned: Vec<String> = vec![
-        "connect".into(),
-        "dsh".into(),
-        "--write".into(),
-        "--skill-file".into(),
-        target.to_string_lossy().to_string(),
-    ];
-    let arg_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-    let out = run(&home, None, &arg_refs, None);
+    let out = run(&home, None, &["connect", "dsh", "--yes"], None);
     assert!(out.status.success(), "connect: {}", stderr(&out));
 
     let first = std::fs::read_to_string(&target).expect("skill file");
@@ -949,16 +942,49 @@ fn connect_dsh_writes_idempotently() {
     );
     assert!(first.contains("tlx inbox-line"), "instruction: {first}");
 
-    let out = run(&home, None, &arg_refs, None);
+    let out = run(&home, None, &["connect", "dsh", "--yes"], None);
     assert!(out.status.success());
     let second = std::fs::read_to_string(&target).expect("skill file");
     assert_eq!(first, second, "not idempotent");
 }
 
 #[test]
+fn connect_dsh_rejects_the_hook_file_flag() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let out = run(
+        &home,
+        None,
+        &["connect", "dsh", "--file", "/tmp/hooks.json", "--yes"],
+        None,
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("--file is not supported"),
+        "stderr: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn connect_requires_confirmation_in_a_pipe() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let out = run(&home, None, &["connect", "dsh"], None);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("confirmation required"),
+        "stderr: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn connect_test_runs_a_synthetic_payload() {
     let harness = Harness::new();
-    let out = harness.run(None, &["connect", "codex", "--test"], None);
+    let out = harness.run(None, &["connect", "codex", "--test", "--yes"], None);
     assert!(out.status.success(), "connect test: {}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("event: SessionStart"), "event echoed: {text}");
