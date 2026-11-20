@@ -949,3 +949,78 @@ fn connect_test_runs_a_synthetic_payload() {
     );
     assert!(text.contains("output: (none)"), "unbound outcome: {text}");
 }
+
+#[test]
+fn setup_creates_a_usable_mailbox_and_is_idempotent() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+
+    let out = run(
+        &home,
+        Some("setup-session"),
+        &[
+            "setup",
+            "--password-stdin",
+            "--domain",
+            "local",
+            "--role",
+            "lead@local",
+            "--json",
+        ],
+        Some(PASSWORD),
+    );
+    assert!(out.status.success(), "setup: {}", stderr(&out));
+    let value = json(&out);
+    assert_eq!(value["initialized"], true);
+    assert_eq!(value["role"], "lead@local");
+    assert_eq!(value["bound"], true);
+    assert!(
+        value["config"]
+            .as_str()
+            .unwrap()
+            .ends_with("config/telex/config.json")
+    );
+    assert!(value["data"].as_str().unwrap().ends_with("data/telex"));
+
+    let whoami = run(&home, Some("setup-session"), &["whoami"], None);
+    assert!(whoami.status.success(), "whoami: {}", stderr(&whoami));
+    assert!(stdout(&whoami).contains("lead@local"));
+
+    let again = run(&home, None, &["setup", "--json"], None);
+    assert!(again.status.success(), "second setup: {}", stderr(&again));
+    let value = json(&again);
+    assert_eq!(value["initialized"], true);
+    assert_eq!(value["domain"], "local");
+    assert!(
+        value["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|role| role == "lead@local")
+    );
+}
+
+#[test]
+fn setup_without_a_session_leaves_login_for_later() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+
+    let out = run(
+        &home,
+        None,
+        &[
+            "setup",
+            "--password-stdin",
+            "--role",
+            "lead@local",
+            "--json",
+        ],
+        Some(PASSWORD),
+    );
+    assert!(out.status.success(), "setup: {}", stderr(&out));
+    let value = json(&out);
+    assert_eq!(value["bound"], false);
+    assert!(value["session"].is_null());
+}

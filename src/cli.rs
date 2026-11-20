@@ -1,6 +1,6 @@
 //! Command line interface. All state lives behind the local daemon.
 
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +25,8 @@ struct Cli {
 enum Commands {
     /// Create the mailbox home and set the admin password.
     Init(InitArgs),
+    /// Set up a fresh mailbox in one step.
+    Setup(SetupArgs),
     /// Show the current session and bound role.
     Whoami,
     /// Manage roles (the address book).
@@ -82,6 +84,20 @@ struct InitArgs {
     password_stdin: bool,
     #[arg(long, default_value = "local")]
     domain: String,
+}
+
+#[derive(Args)]
+struct SetupArgs {
+    #[arg(long)]
+    password_stdin: bool,
+    /// Default domain. Prompted when omitted in a terminal.
+    #[arg(long)]
+    domain: Option<String>,
+    /// First role. Defaults to $USER@<domain>.
+    #[arg(long)]
+    role: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -340,6 +356,7 @@ pub fn run() -> Result<()> {
     let home = Paths::from_env()?;
     match cli.command {
         Commands::Init(args) => init(&home, args),
+        Commands::Setup(args) => setup(&home, args),
         Commands::Whoami => whoami(&home),
         Commands::Role(cmd) => role(&home, cmd),
         Commands::Login(args) => login(&home, args),
@@ -448,6 +465,145 @@ fn init(home: &Paths, args: InitArgs) -> Result<()> {
     store.init(&password, &domain)?;
     println!("initialized {}", home.data_dir().display());
     println!("next: tlx role add <address> --password-stdin, then tlx login <role>");
+    Ok(())
+}
+
+fn read_new_password(password_stdin: bool) -> Result<String> {
+    if password_stdin || !std::io::stdin().is_terminal() {
+        return read_password(true);
+    }
+    let first = rpassword::prompt_password("admin password: ")?;
+    let second = rpassword::prompt_password("confirm password: ")?;
+    if first != second {
+        bail!("passwords do not match");
+    }
+    Ok(first)
+}
+
+fn prompt_line(prompt: &str, default: &str) -> Result<String> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(default.to_string());
+    }
+    print!("{prompt} [{default}]: ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let line = line.trim();
+    Ok(if line.is_empty() {
+        default.to_string()
+    } else {
+        line.to_string()
+    })
+}
+
+fn default_role(domain: &str) -> String {
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "admin".to_string());
+    let candidate = format!("{user}@{domain}");
+    Address::parse(&candidate, domain)
+        .map(|address| address.to_string())
+        .unwrap_or_else(|_| format!("admin@{domain}"))
+}
+
+fn explicit_session() -> Option<String> {
+    std::env::var("TELEX_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
+    let store = Store::new(home.clone());
+    if store.config_path().exists() {
+        let config = store.load_config()?;
+        let roles = store.list_roles()?;
+        let role_names: Vec<&str> = roles.iter().map(|role| role.address.as_str()).collect();
+        if args.json {
+            println!(
+                "{}",
+                json!({
+                    "initialized": true,
+                    "config": home.config_file().display().to_string(),
+                    "data": home.data_dir().display().to_string(),
+                    "domain": config.domain,
+                    "roles": role_names,
+                    "session": explicit_session(),
+                })
+            );
+        } else {
+            println!("already initialized: {}", home.data_dir().display());
+            println!("domain: {}", config.domain);
+            if role_names.is_empty() {
+                println!("roles: (none)");
+            } else {
+                println!("roles: {}", role_names.join(", "));
+            }
+        }
+        return Ok(());
+    }
+
+    let password = read_new_password(args.password_stdin)?;
+    if password.chars().count() < 12 {
+        bail!("admin password must be at least 12 characters");
+    }
+    let domain = match args.domain {
+        Some(domain) => domain.to_ascii_lowercase(),
+        None => prompt_line("domain", "local")?.to_ascii_lowercase(),
+    };
+    Address::parse("probe", &domain).context("invalid domain")?;
+    let role_default = default_role(&domain);
+    let role_input = match args.role {
+        Some(role) => role,
+        None => prompt_line("first role", &role_default)?,
+    };
+    let role_address = Address::parse(&role_input, &domain)?;
+
+    store.init(&password, &domain)?;
+    let role = store.add_role(&role_address, None, Vec::new())?;
+    let session = explicit_session();
+    let bound = match &session {
+        Some(session) => {
+            store.bind_session(&role.address, session, &harness())?;
+            true
+        }
+        None => false,
+    };
+
+    if args.json {
+        println!(
+            "{}",
+            json!({
+                "initialized": true,
+                "config": home.config_file().display().to_string(),
+                "data": home.data_dir().display().to_string(),
+                "domain": domain,
+                "role": role.address,
+                "session": session,
+                "bound": bound,
+            })
+        );
+    } else {
+        println!("initialized: {}", home.data_dir().display());
+        println!("domain: {domain}");
+        println!("role: {}", role.address);
+        if bound {
+            println!(
+                "session: {} (bound to {})",
+                session.as_deref().unwrap_or(""),
+                role.address
+            );
+        }
+        println!("next:");
+        println!("  tlx connect claude --write");
+        println!("  tlx role add worker@local --password-stdin");
+        if !bound {
+            println!(
+                "  在 harness 会话里运行 tlx login {}，再在终端运行 tlx approve <配对码>",
+                role.address
+            );
+        }
+    }
     Ok(())
 }
 
