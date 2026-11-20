@@ -122,6 +122,10 @@ impl Paths {
         self.state_dir.join("hook")
     }
 
+    pub fn session_handoff_dir(&self) -> PathBuf {
+        self.state_dir.join("session-handoff")
+    }
+
     pub fn socket_path(&self) -> PathBuf {
         self.runtime_dir.join("maild.sock")
     }

@@ -48,7 +48,7 @@ cargo build --release
 |---|---|
 | 配置 | `~/.config/telex/config.json` |
 | 角色、邮件、已读/回执标记 | `~/.local/share/telex/` |
-| 登录、token、待批申请、认领、唤醒记录 | `~/.local/state/telex/` |
+| 登录、token、待批申请、认领、唤醒记录、会话交接 | `~/.local/state/telex/` |
 | SQLite 索引 | `~/.cache/telex/index.sqlite3` |
 | socket 和锁文件 | `$XDG_RUNTIME_DIR/telex/` |
 

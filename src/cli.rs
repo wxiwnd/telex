@@ -399,8 +399,8 @@ pub fn run() -> Result<()> {
     }
 }
 
-fn session_id() -> Option<String> {
-    Store::session_id_from_env()
+fn session_id(home: &Paths) -> Option<String> {
+    Store::session_id_from_env().or_else(|| Store::new(home.clone()).find_session_handoff())
 }
 
 fn harness() -> String {
@@ -417,7 +417,7 @@ fn harness() -> String {
 
 fn rpc(home: &Paths, method: &str, mut params: Value) -> Result<Value> {
     let store = Store::new(home.clone());
-    let session = session_id();
+    let session = session_id(home);
     if let Some(session) = &session {
         params["session_id"] = json!(session);
     }
@@ -582,7 +582,7 @@ fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
 }
 
 fn whoami(home: &Paths) -> Result<()> {
-    let session = session_id();
+    let session = session_id(home);
     match rpc(home, "whoami", json!({})) {
         Ok(value) => println!("{}", serde_json::to_string_pretty(&value)?),
         Err(err) => {
@@ -648,7 +648,8 @@ fn role(home: &Paths, cmd: RoleCmd) -> Result<()> {
 }
 
 fn login(home: &Paths, args: LoginArgs) -> Result<()> {
-    let session = session_id().ok_or_else(|| anyhow!("no session id in environment"))?;
+    let session =
+        session_id(home).ok_or_else(|| anyhow!("no session id available; run inside a harness"))?;
     let domain = Store::new(home.clone()).config().domain;
     let role = Address::parse(&args.role, &domain)?.to_string();
     let value = rpc(
@@ -1140,25 +1141,39 @@ impl HookOutcome {
     }
 }
 
-fn hook_session(payload: &Value) -> Option<String> {
+fn hook_session(payload: &Value, home: &Paths) -> Option<String> {
     payload["session_id"]
         .as_str()
         .or_else(|| payload["thread_id"].as_str())
         .map(|value| value.to_string())
-        .or_else(session_id)
+        .or_else(|| session_id(home))
 }
 
 /// Compute what the hook should print for one payload. Shared by the stdin
 /// entry point and `tlx connect --test`, so the fixture path exercises the same
 /// code as a real harness invocation.
-fn evaluate_hook(home: &Paths, payload: &Value, event: &str) -> HookOutcome {
+fn evaluate_hook(
+    home: &Paths,
+    payload: &Value,
+    event: &str,
+    harness: &str,
+    record_handoff: bool,
+) -> HookOutcome {
     let kind = hook_event_kind(event);
-    let Some(session) = hook_session(payload) else {
+    let Some(session) = hook_session(payload, home) else {
         return HookOutcome::empty();
     };
     let store = Store::new(home.clone());
     if !store.config_path().exists() {
         return HookOutcome::empty();
+    }
+    if record_handoff {
+        let cwd = payload["cwd"]
+            .as_str()
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let _ = store.record_session_handoff(&session, harness, &cwd);
     }
     // A hook is inert until the session has been explicitly joined and the
     // admin has approved it. Pending logins and unrelated harness sessions
@@ -1204,7 +1219,7 @@ fn hook(home: &Paths, args: HookArgs) -> Result<()> {
         .as_str()
         .unwrap_or(&args.event)
         .to_string();
-    let outcome = evaluate_hook(home, &payload, &event);
+    let outcome = evaluate_hook(home, &payload, &event, &args.harness, true);
     for line in &outcome.stdout {
         println!("{line}");
     }
@@ -1253,7 +1268,7 @@ fn connect_test(home: &Paths, harness: &str) {
         "hook_event_name": "SessionStart",
         "cwd": ".",
     });
-    let outcome = evaluate_hook(home, &payload, "SessionStart");
+    let outcome = evaluate_hook(home, &payload, "SessionStart", harness, false);
     println!("event: SessionStart");
     println!("session: {session}");
     if outcome.stdout.is_empty() && outcome.stop_stderr.is_none() {

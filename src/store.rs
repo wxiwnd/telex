@@ -19,6 +19,7 @@ use crate::domain::canonical::sha256_hex;
 use crate::domain::{Address, Envelope};
 use crate::index::{IndexedMessage, MailIndex};
 use crate::paths::Paths;
+use crate::process::ancestor_pids;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -151,6 +152,14 @@ pub struct WakeFailure {
 struct RevokedSession {
     role: String,
     at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionHandoff {
+    session_id: String,
+    harness: String,
+    cwd: String,
+    created_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,6 +539,44 @@ impl Store {
             return Ok(None);
         };
         self.get_role(&auth.role)
+    }
+
+    pub fn record_session_handoff(
+        &self,
+        session_id: &str,
+        harness: &str,
+        cwd: &Path,
+    ) -> Result<()> {
+        let dir = self.paths.session_handoff_dir();
+        fs::create_dir_all(&dir)?;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        let handoff = SessionHandoff {
+            session_id: session_id.to_string(),
+            harness: harness.to_string(),
+            cwd: cwd.display().to_string(),
+            created_at: now_rfc3339(),
+        };
+        for pid in ancestor_pids() {
+            write_json_atomic(&dir.join(format!("{pid}.json")), &handoff)?;
+        }
+        Ok(())
+    }
+
+    pub fn find_session_handoff(&self) -> Option<String> {
+        let dir = self.paths.session_handoff_dir();
+        for pid in ancestor_pids() {
+            let path = dir.join(format!("{pid}.json"));
+            let Ok(handoff) = read_json::<SessionHandoff>(&path) else {
+                continue;
+            };
+            let Ok(created_at) = parse_rfc3339(&handoff.created_at) else {
+                continue;
+            };
+            if Utc::now() - created_at < Duration::hours(24) && !handoff.session_id.is_empty() {
+                return Some(handoff.session_id);
+            }
+        }
+        None
     }
 
     // ---------------------------------------------------------------- mail paths
