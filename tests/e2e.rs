@@ -949,3 +949,60 @@ fn connect_test_runs_a_synthetic_payload() {
     );
     assert!(text.contains("output: (none)"), "unbound outcome: {text}");
 }
+
+#[test]
+fn setup_initializes_and_does_not_bind_a_session() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+
+    // A harness session id must not turn setup into a binding operation.
+    let out = run(
+        &home,
+        Some("setup-session"),
+        &[
+            "setup",
+            "--password-stdin",
+            "--domain",
+            "local",
+            "--role",
+            "lead@local",
+            "--json",
+        ],
+        Some(PASSWORD),
+    );
+    assert!(out.status.success(), "setup: {}", stderr(&out));
+    let value = json(&out);
+    assert_eq!(value["initialized"], true);
+    assert_eq!(value["role"], "lead@local");
+    assert!(value.get("session").is_none());
+    assert!(value.get("bound").is_none());
+    assert!(
+        value["config"]
+            .as_str()
+            .unwrap()
+            .ends_with("config/telex/config.json")
+    );
+    assert!(value["data"].as_str().unwrap().ends_with("data/telex"));
+
+    let whoami = run(&home, Some("setup-session"), &["whoami"], None);
+    assert!(whoami.status.success(), "whoami: {}", stderr(&whoami));
+    assert!(
+        stdout(&whoami).contains("not logged in"),
+        "setup should not bind: {}",
+        stdout(&whoami)
+    );
+
+    let again = run(&home, None, &["setup", "--json"], None);
+    assert!(again.status.success(), "second setup: {}", stderr(&again));
+    let value = json(&again);
+    assert_eq!(value["initialized"], true);
+    assert_eq!(value["domain"], "local");
+    assert!(
+        value["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|role| role == "lead@local")
+    );
+}

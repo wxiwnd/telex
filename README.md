@@ -12,19 +12,21 @@
 
 ```bash
 cargo build --release
-./target/release/tlx init --password-stdin
-./target/release/tlx role add lead@local --password-stdin
+
+# 创建 XDG 目录、管理密码和第一个角色
+./target/release/tlx setup
 ./target/release/tlx role add worker@local --password-stdin
 
-TELEX_SESSION_ID=lead-1 ./target/release/tlx login lead@local
-# 记下配对码，换一个终端（或在同一个终端）批准
-./target/release/tlx approve <配对码> --password-stdin
+# 在 lead agent 所在的 harness 会话里
+./target/release/tlx login lead@local
+# 记下配对码，在终端运行 tlx approve <配对码> --password-stdin
 
-TELEX_SESSION_ID=lead-1 ./target/release/tlx send \
+./target/release/tlx send \
   --to worker@local --subject "flaky test" --body "Can you look?" --intent question
 
-TELEX_SESSION_ID=worker-1 ./target/release/tlx login worker@local
-# 批准后就能用 inbox 和 read
+# 在 worker agent 所在的 harness 会话里
+./target/release/tlx login worker@local
+# approve 之后 hook 才生效，就能用 inbox 和 read
 ```
 
 接入 harness：
@@ -46,7 +48,7 @@ TELEX_SESSION_ID=worker-1 ./target/release/tlx login worker@local
 |---|---|
 | 配置 | `~/.config/telex/config.json` |
 | 角色、邮件、已读/回执标记 | `~/.local/share/telex/` |
-| 登录、token、待批申请、认领、唤醒记录 | `~/.local/state/telex/` |
+| 登录、token、待批申请、认领、唤醒记录、会话交接 | `~/.local/state/telex/` |
 | SQLite 索引 | `~/.cache/telex/index.sqlite3` |
 | socket 和锁文件 | `$XDG_RUNTIME_DIR/telex/` |
 

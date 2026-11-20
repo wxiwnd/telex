@@ -92,6 +92,8 @@ Telex 不追求实时，接入以「拉」为主，分三层：
 
 会话必须先用 `tlx login` 显式加入，再由管理员 `tlx approve` 批准。只有批准后生成了 token，hook 才会输出；未绑定、待批准、token 过期都静默。hook 只带数量和角色，不带内容。
 
+会话 id 不需要用户显式提供。hook 在 SessionStart 时把 session id 写进 state，`tlx login` 沿进程祖先链找到它；找不到时才要求 harness 环境变量。
+
 `tlx inbox-file` 生成收件箱摘要，自动刷新还没做。人也可以手动触发唤醒。装完后用 `tlx connect` 查看状态。
 
 ### 4.8 管理员
