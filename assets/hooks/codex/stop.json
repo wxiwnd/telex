@@ -1,0 +1,13 @@
+{
+  "hooks": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{TLX}} hook --event Stop --harness codex",
+          "timeout": 30
+        }
+      ]
+    }
+  ]
+}
