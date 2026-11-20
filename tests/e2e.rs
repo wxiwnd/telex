@@ -951,11 +951,12 @@ fn connect_test_runs_a_synthetic_payload() {
 }
 
 #[test]
-fn setup_creates_a_usable_mailbox_and_is_idempotent() {
+fn setup_initializes_and_does_not_bind_a_session() {
     let dir = TempDir::new().expect("temp");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("home");
 
+    // A harness session id must not turn setup into a binding operation.
     let out = run(
         &home,
         Some("setup-session"),
@@ -974,7 +975,8 @@ fn setup_creates_a_usable_mailbox_and_is_idempotent() {
     let value = json(&out);
     assert_eq!(value["initialized"], true);
     assert_eq!(value["role"], "lead@local");
-    assert_eq!(value["bound"], true);
+    assert!(value.get("session").is_none());
+    assert!(value.get("bound").is_none());
     assert!(
         value["config"]
             .as_str()
@@ -985,7 +987,11 @@ fn setup_creates_a_usable_mailbox_and_is_idempotent() {
 
     let whoami = run(&home, Some("setup-session"), &["whoami"], None);
     assert!(whoami.status.success(), "whoami: {}", stderr(&whoami));
-    assert!(stdout(&whoami).contains("lead@local"));
+    assert!(
+        stdout(&whoami).contains("not logged in"),
+        "setup should not bind: {}",
+        stdout(&whoami)
+    );
 
     let again = run(&home, None, &["setup", "--json"], None);
     assert!(again.status.success(), "second setup: {}", stderr(&again));
@@ -999,28 +1005,4 @@ fn setup_creates_a_usable_mailbox_and_is_idempotent() {
             .iter()
             .any(|role| role == "lead@local")
     );
-}
-
-#[test]
-fn setup_without_a_session_leaves_login_for_later() {
-    let dir = TempDir::new().expect("temp");
-    let home = dir.path().join("home");
-    std::fs::create_dir_all(&home).expect("home");
-
-    let out = run(
-        &home,
-        None,
-        &[
-            "setup",
-            "--password-stdin",
-            "--role",
-            "lead@local",
-            "--json",
-        ],
-        Some(PASSWORD),
-    );
-    assert!(out.status.success(), "setup: {}", stderr(&out));
-    let value = json(&out);
-    assert_eq!(value["bound"], false);
-    assert!(value["session"].is_null());
 }

@@ -507,12 +507,6 @@ fn default_role(domain: &str) -> String {
         .unwrap_or_else(|_| format!("admin@{domain}"))
 }
 
-fn explicit_session() -> Option<String> {
-    std::env::var("TELEX_SESSION_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
 fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
     let store = Store::new(home.clone());
     if store.config_path().exists() {
@@ -528,7 +522,6 @@ fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
                     "data": home.data_dir().display().to_string(),
                     "domain": config.domain,
                     "roles": role_names,
-                    "session": explicit_session(),
                 })
             );
         } else {
@@ -561,14 +554,6 @@ fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
 
     store.init(&password, &domain)?;
     let role = store.add_role(&role_address, None, Vec::new())?;
-    let session = explicit_session();
-    let bound = match &session {
-        Some(session) => {
-            store.bind_session(&role.address, session, &harness())?;
-            true
-        }
-        None => false,
-    };
 
     if args.json {
         println!(
@@ -579,30 +564,19 @@ fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
                 "data": home.data_dir().display().to_string(),
                 "domain": domain,
                 "role": role.address,
-                "session": session,
-                "bound": bound,
             })
         );
     } else {
         println!("initialized: {}", home.data_dir().display());
         println!("domain: {domain}");
         println!("role: {}", role.address);
-        if bound {
-            println!(
-                "session: {} (bound to {})",
-                session.as_deref().unwrap_or(""),
-                role.address
-            );
-        }
         println!("next:");
         println!("  tlx connect claude --write");
         println!("  tlx role add worker@local --password-stdin");
-        if !bound {
-            println!(
-                "  在 harness 会话里运行 tlx login {}，再在终端运行 tlx approve <配对码>",
-                role.address
-            );
-        }
+        println!(
+            "  在 harness 会话里运行 tlx login {}，再在终端运行 tlx approve <配对码>",
+            role.address
+        );
     }
     Ok(())
 }

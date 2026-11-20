@@ -13,17 +13,20 @@
 ```bash
 cargo build --release
 
-# 创建 XDG 目录、管理密码和第一个角色；设置 TELEX_SESSION_ID 时会自动绑定
-TELEX_SESSION_ID=lead-1 ./target/release/tlx setup
-
+# 创建 XDG 目录、管理密码和第一个角色
+./target/release/tlx setup
 ./target/release/tlx role add worker@local --password-stdin
 
-TELEX_SESSION_ID=lead-1 ./target/release/tlx send \
+# 在 lead agent 所在的 harness 会话里
+./target/release/tlx login lead@local
+# 记下配对码，在终端运行 tlx approve <配对码> --password-stdin
+
+./target/release/tlx send \
   --to worker@local --subject "flaky test" --body "Can you look?" --intent question
 
-TELEX_SESSION_ID=worker-1 ./target/release/tlx login worker@local
-# 记下配对码，在终端运行 tlx approve <配对码> --password-stdin
-# 批准后 worker 的 hook 才会生效，就能用 inbox 和 read
+# 在 worker agent 所在的 harness 会话里
+./target/release/tlx login worker@local
+# approve 之后 hook 才生效，就能用 inbox 和 read
 ```
 
 接入 harness：
