@@ -691,34 +691,63 @@ fn init_rejects_an_invalid_domain() {
 }
 
 #[test]
-fn hook_prints_bootstrap_line_for_unbound_session() {
+fn hook_stays_silent_for_unbound_session() {
     let harness = Harness::new();
-    let out = harness.run(
+    for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+        let out = harness.run(
+            None,
+            &["hook", "--event", event],
+            Some(r#"{"session_id":"ghost-session"}"#),
+        );
+        assert!(out.status.success(), "hook {event}: {}", stderr(&out));
+        assert_eq!(stdout(&out), "", "{event} should stay silent");
+        assert_eq!(stderr(&out), "", "{event} should not write stderr");
+    }
+}
+
+#[test]
+fn hook_stays_silent_until_binding_is_approved() {
+    let harness = Harness::new();
+    harness.add_role("lead@local");
+    harness.add_role("worker@local");
+    harness.bind("session-lead", "lead@local");
+
+    let code = harness.login("session-pending", "worker@local");
+    let sent = harness.run(
+        Some("session-lead"),
+        &[
+            "send",
+            "--to",
+            "worker@local",
+            "--subject",
+            "waiting",
+            "--body",
+            "approve me",
+        ],
+        None,
+    );
+    assert!(sent.status.success(), "send: {}", stderr(&sent));
+
+    let before = harness.run(
         None,
         &["hook", "--event", "SessionStart"],
-        Some(r#"{"session_id":"ghost-session"}"#),
+        Some(r#"{"session_id":"session-pending"}"#),
     );
-    assert!(out.status.success(), "hook: {}", stderr(&out));
-    let text = stdout(&out);
-    assert!(text.contains("未绑定"), "bootstrap line: {text}");
-    assert!(
-        text.contains("ghost-session"),
-        "session id surfaced: {text}"
-    );
-    assert!(
-        text.contains("TELEX_SESSION_ID=ghost-session"),
-        "login hint: {text}"
-    );
+    assert!(before.status.success());
+    assert_eq!(stdout(&before), "", "pending session must stay silent");
 
-    // UserPromptSubmit stays quiet for unbound sessions: one nudge per
-    // session is enough.
-    let out = harness.run(
+    harness.approve(&code);
+    let after = harness.run(
         None,
-        &["hook", "--event", "UserPromptSubmit"],
-        Some(r#"{"session_id":"ghost-session"}"#),
+        &["hook", "--event", "SessionStart"],
+        Some(r#"{"session_id":"session-pending"}"#),
     );
-    assert!(out.status.success());
-    assert_eq!(stdout(&out), "", "UserPromptSubmit should stay silent");
+    assert!(after.status.success());
+    assert!(
+        stdout(&after).contains("1 封未读"),
+        "approved session should get a badge: {}",
+        stdout(&after)
+    );
 }
 
 #[test]
@@ -918,5 +947,5 @@ fn connect_test_runs_a_synthetic_payload() {
         text.contains("session: tlx-connect-test-codex"),
         "session: {text}"
     );
-    assert!(text.contains("未绑定"), "bootstrap path shown: {text}");
+    assert!(text.contains("output: (none)"), "unbound outcome: {text}");
 }
