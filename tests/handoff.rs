@@ -30,8 +30,8 @@ fn login_finds_the_session_id_written_by_the_hook() {
     // commands. No TELEX_SESSION_ID is provided.
     let hook = env.run(
         &root,
-        &["hook", "--event", "SessionStart", "--harness", "test"],
-        Some(r#"{"session_id":"handoff-session","hook_event_name":"SessionStart","cwd":"."}"#),
+        &["hook", "--event", "UserPromptSubmit", "--harness", "test"],
+        Some(r#"{"session_id":"handoff-session","hook_event_name":"UserPromptSubmit","cwd":"."}"#),
     );
     assert!(hook.status.success(), "hook: {}", stderr(&hook));
 

@@ -280,7 +280,7 @@ struct WakeArgs {
 
 #[derive(Args)]
 struct HookArgs {
-    #[arg(long, default_value = "SessionStart")]
+    #[arg(long, default_value = "UserPromptSubmit")]
     event: String,
     #[arg(long, default_value = "unknown")]
     harness: String,
@@ -291,7 +291,7 @@ struct ConnectArgs {
     /// claude, codex, or dsh. Omit to show connection status.
     harness: Option<String>,
     /// Hook events for Claude Code and Codex, comma separated.
-    #[arg(long, default_value = "SessionStart")]
+    #[arg(long, default_value = "UserPromptSubmit")]
     events: String,
     /// Override the hook config file for Claude Code or Codex.
     #[arg(long)]
@@ -299,7 +299,7 @@ struct ConnectArgs {
     /// Install without asking for confirmation.
     #[arg(long, short = 'y')]
     yes: bool,
-    /// Run a synthetic SessionStart payload after connecting.
+    /// Run a synthetic UserPromptSubmit payload after connecting.
     #[arg(long)]
     test: bool,
     #[arg(long)]
@@ -1112,7 +1112,6 @@ fn wake(home: &Paths, args: WakeArgs) -> Result<()> {
 }
 
 enum HookEventKind {
-    SessionStart,
     UserPromptSubmit,
     Stop,
     Other,
@@ -1120,7 +1119,6 @@ enum HookEventKind {
 
 fn hook_event_kind(name: &str) -> HookEventKind {
     match name.to_ascii_lowercase().as_str() {
-        "sessionstart" => HookEventKind::SessionStart,
         "userpromptsubmit" => HookEventKind::UserPromptSubmit,
         "stop" => HookEventKind::Stop,
         _ => HookEventKind::Other,
@@ -1160,6 +1158,9 @@ fn evaluate_hook(
     record_handoff: bool,
 ) -> HookOutcome {
     let kind = hook_event_kind(event);
+    if matches!(kind, HookEventKind::Other) {
+        return HookOutcome::empty();
+    }
     let Some(session) = hook_session(payload, home) else {
         return HookOutcome::empty();
     };
@@ -1203,7 +1204,7 @@ fn evaluate_hook(
                 HookOutcome::empty()
             }
         }
-        HookEventKind::SessionStart | HookEventKind::UserPromptSubmit => HookOutcome {
+        HookEventKind::UserPromptSubmit => HookOutcome {
             stdout: vec![line],
             stop_stderr: None,
         },
@@ -1279,7 +1280,7 @@ fn connect(home: &Paths, args: ConnectArgs) -> Result<()> {
             if args.file.is_some() {
                 bail!("dsh has no hook config; --file is not supported");
             }
-            if args.events != "SessionStart" {
+            if args.events != "UserPromptSubmit" {
                 bail!("dsh uses a skill, not hook events");
             }
             if args.test {
@@ -1331,11 +1332,11 @@ fn connect_test(home: &Paths, harness: &str) {
     let session = format!("tlx-connect-test-{harness}");
     let payload = json!({
         "session_id": session,
-        "hook_event_name": "SessionStart",
+        "hook_event_name": "UserPromptSubmit",
         "cwd": ".",
     });
-    let outcome = evaluate_hook(home, &payload, "SessionStart", harness, false);
-    println!("event: SessionStart");
+    let outcome = evaluate_hook(home, &payload, "UserPromptSubmit", harness, false);
+    println!("event: UserPromptSubmit");
     println!("session: {session}");
     if outcome.stdout.is_empty() && outcome.stop_stderr.is_none() {
         println!("output: (none)");
@@ -1573,6 +1574,21 @@ fn install_hook(harness: &str, file: &Path, events: &str) -> Result<()> {
     let hooks_object = hooks_object
         .as_object_mut()
         .ok_or_else(|| anyhow!("hooks is not an object"))?;
+    // Older versions installed a SessionStart hook. It is no longer supported:
+    // drop Telex's entries there, but keep any unrelated SessionStart hooks.
+    let drop_session_start = if let Some(value) = hooks_object.get_mut("SessionStart") {
+        if let Some(entries) = value.as_array_mut() {
+            entries.retain(|entry| !entry.to_string().contains("hook --event"));
+            entries.is_empty()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if drop_session_start {
+        hooks_object.remove("SessionStart");
+    }
     for (event, value) in settings["hooks"].as_object().unwrap() {
         let existing = hooks_object
             .entry(event.clone())
@@ -1595,18 +1611,15 @@ fn install_hook(harness: &str, file: &Path, events: &str) -> Result<()> {
 
 fn hook_template(harness: &str, event: &str) -> Result<Value> {
     let file = match event {
-        "SessionStart" => "session-start",
         "UserPromptSubmit" => "user-prompt-submit",
         "Stop" => "stop",
         other => bail!("unsupported hook event: {other}"),
     };
     let raw = match (harness, file) {
-        ("claude", "session-start") => include_str!("../assets/hooks/claude/session-start.json"),
         ("claude", "user-prompt-submit") => {
             include_str!("../assets/hooks/claude/user-prompt-submit.json")
         }
         ("claude", "stop") => include_str!("../assets/hooks/claude/stop.json"),
-        ("codex", "session-start") => include_str!("../assets/hooks/codex/session-start.json"),
         ("codex", "user-prompt-submit") => {
             include_str!("../assets/hooks/codex/user-prompt-submit.json")
         }

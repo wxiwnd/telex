@@ -283,7 +283,7 @@ fn hook_prints_one_line_badge() {
 
     let hook = harness.run(
         Some("session-worker"),
-        &["hook", "--event", "SessionStart", "--harness", "claude"],
+        &["hook", "--event", "UserPromptSubmit", "--harness", "claude"],
         Some(r#"{"session_id":"session-worker"}"#),
     );
     assert!(hook.status.success(), "hook: {}", stderr(&hook));
@@ -350,7 +350,7 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
     let settings = dir.path().join("settings.json");
     std::fs::write(
         &settings,
-        r#"{"model":"keep-me","hooks":{"SessionStart":[]}}"#,
+        r#"{"model":"keep-me","hooks":{"UserPromptSubmit":[],"SessionStart":[{"hooks":[{"type":"command","command":"/bin/true"}]},{"hooks":[{"type":"command","command":"\"tlx\" hook --event SessionStart --harness claude"}]}]}}"#,
     )
     .expect("settings");
     let skill_file = home.join(".claude/skills/telex/SKILL.md");
@@ -363,7 +363,7 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
             "claude",
             "--yes",
             "--events",
-            "SessionStart,UserPromptSubmit,Stop",
+            "UserPromptSubmit,Stop",
             "--file",
             settings.to_str().unwrap(),
         ],
@@ -373,7 +373,10 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
     let value: Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("json");
     assert_eq!(value["model"], "keep-me");
-    for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+    let session_start = value["hooks"]["SessionStart"].as_array().expect("group");
+    assert_eq!(session_start.len(), 1, "old Telex hook removed");
+    assert_eq!(session_start[0]["hooks"][0]["command"], "/bin/true");
+    for event in ["UserPromptSubmit", "Stop"] {
         let command = value["hooks"][event][0]["hooks"][0]["command"]
             .as_str()
             .unwrap_or_default();
@@ -400,7 +403,7 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
             "claude",
             "--yes",
             "--events",
-            "SessionStart,UserPromptSubmit,Stop",
+            "UserPromptSubmit,Stop",
             "--file",
             settings.to_str().unwrap(),
         ],
@@ -409,7 +412,9 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
     assert!(out.status.success());
     let value: Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("json");
-    let entries = value["hooks"]["SessionStart"].as_array().expect("hooks");
+    let entries = value["hooks"]["UserPromptSubmit"]
+        .as_array()
+        .expect("hooks");
     let count = entries
         .iter()
         .filter(|entry| entry.to_string().contains("hook --event"))
@@ -706,7 +711,7 @@ fn init_rejects_an_invalid_domain() {
 #[test]
 fn hook_stays_silent_for_unbound_session() {
     let harness = Harness::new();
-    for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+    for event in ["UserPromptSubmit", "Stop"] {
         let out = harness.run(
             None,
             &["hook", "--event", event],
@@ -743,7 +748,7 @@ fn hook_stays_silent_until_binding_is_approved() {
 
     let before = harness.run(
         None,
-        &["hook", "--event", "SessionStart"],
+        &["hook", "--event", "UserPromptSubmit"],
         Some(r#"{"session_id":"session-pending"}"#),
     );
     assert!(before.status.success());
@@ -752,7 +757,7 @@ fn hook_stays_silent_until_binding_is_approved() {
     harness.approve(&code);
     let after = harness.run(
         None,
-        &["hook", "--event", "SessionStart"],
+        &["hook", "--event", "UserPromptSubmit"],
         Some(r#"{"session_id":"session-pending"}"#),
     );
     assert!(after.status.success());
@@ -787,11 +792,11 @@ fn hook_event_name_from_payload_wins_over_flag() {
     );
     assert!(sent.status.success(), "send: {}", stderr(&sent));
 
-    // Flag says SessionStart, payload says UserPromptSubmit: payload wins and
-    // the badge still prints.
+    // Flag says Stop, payload says UserPromptSubmit: payload wins and the
+    // badge still prints.
     let out = harness.run(
         Some("session-worker"),
-        &["hook", "--event", "SessionStart", "--harness", "claude"],
+        &["hook", "--event", "Stop", "--harness", "claude"],
         Some(r#"{"session_id":"session-worker","hook_event_name":"UserPromptSubmit"}"#),
     );
     assert!(out.status.success(), "hook: {}", stderr(&out));
@@ -800,7 +805,7 @@ fn hook_event_name_from_payload_wins_over_flag() {
     // Payload says Stop: exit code 2 with the badge on stderr.
     let out = harness.run(
         Some("session-worker"),
-        &["hook", "--event", "SessionStart", "--harness", "claude"],
+        &["hook", "--event", "UserPromptSubmit", "--harness", "claude"],
         Some(r#"{"session_id":"session-worker","hook_event_name":"Stop"}"#),
     );
     assert_eq!(out.status.code(), Some(2), "stop exit code");
@@ -832,7 +837,7 @@ fn connect_codex_writes_and_merges_idempotently() {
             "codex",
             "--yes",
             "--events",
-            "SessionStart,Stop",
+            "UserPromptSubmit,Stop",
             "--file",
             file.to_str().unwrap(),
         ],
@@ -863,19 +868,17 @@ fn connect_codex_writes_and_merges_idempotently() {
         .collect();
     assert!(stop_commands.contains(&"/bin/true"), "existing hook kept");
 
-    let session_start = value["hooks"]["SessionStart"].as_array().expect("group");
-    assert_eq!(
-        session_start[0]["matcher"],
-        "startup|resume|clear|compact|fork"
-    );
-    let handler = &session_start[0]["hooks"][0];
+    let prompt_submit = value["hooks"]["UserPromptSubmit"]
+        .as_array()
+        .expect("group");
+    let handler = &prompt_submit[0]["hooks"][0];
     assert_eq!(handler["type"], "command");
     assert_eq!(handler["timeout"], 10);
     assert!(
         handler["command"]
             .as_str()
             .unwrap()
-            .contains("hook --event SessionStart --harness codex")
+            .contains("hook --event UserPromptSubmit --harness codex")
     );
 
     let stop_telex = value["hooks"]["Stop"]
@@ -902,7 +905,7 @@ fn connect_codex_writes_and_merges_idempotently() {
             "codex",
             "--yes",
             "--events",
-            "SessionStart,Stop",
+            "UserPromptSubmit,Stop",
             "--file",
             file.to_str().unwrap(),
         ],
@@ -911,7 +914,7 @@ fn connect_codex_writes_and_merges_idempotently() {
     assert!(out.status.success());
     let value: Value =
         serde_json::from_str(&std::fs::read_to_string(&file).expect("read")).expect("json");
-    let telex_count = value["hooks"]["SessionStart"]
+    let telex_count = value["hooks"]["UserPromptSubmit"]
         .as_array()
         .unwrap()
         .iter()
@@ -987,7 +990,10 @@ fn connect_test_runs_a_synthetic_payload() {
     let out = harness.run(None, &["connect", "codex", "--test", "--yes"], None);
     assert!(out.status.success(), "connect test: {}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.contains("event: SessionStart"), "event echoed: {text}");
+    assert!(
+        text.contains("event: UserPromptSubmit"),
+        "event echoed: {text}"
+    );
     assert!(
         text.contains("session: tlx-connect-test-codex"),
         "session: {text}"

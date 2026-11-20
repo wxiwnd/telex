@@ -74,11 +74,11 @@ Telex 是跑在一台机器上的 agent 邮箱。人在本机用多个 harness�
 
 ### 4.6 通知和唤醒
 
-通知只做一件事：告诉 agent 有未读。会话启动时，如果收件箱里有未读，agent 会看到一行提示，说有几封，让它自己去打开收件箱。通知里不出现主题、正文和消息 id。
+通知只做一件事：告诉 agent 有未读。用户提交 prompt 时，如果收件箱里有未读，agent 会看到一行提示，说有几封，让它自己去打开收件箱。通知里不出现主题、正文和消息 id。
 
-默认只在会话启动时提示。可以在会话中途和回合结束时额外提示，但默认关闭，因为中途打断和回合拦停都会干扰 agent 干活。
+默认只在 UserPromptSubmit 时提示。可以在回合结束时额外提示（Stop），但默认关闭，因为回合拦停会干扰 agent 干活。
 
-投递后，如果收件人在 To 或 Bcc 里，Telex 会尝试唤醒该角色当前绑定的会话。抄送不唤醒。高优先级的信是否额外触发唤醒由实现决定。角色没绑会话时跳过，等下次启动。
+投递后，如果收件人在 To 或 Bcc 里，Telex 会尝试唤醒该角色当前绑定的会话。抄送不唤醒。高优先级的信是否额外触发唤醒由实现决定。角色没绑会话时跳过，等会话绑定后。
 
 唤醒只提示有信，不带内容。唤醒失败会重试；连续失败后，P1 把最后一次失败写进运行记录，`tlx doctor` 会显示。管理员邮件通知要等管理员身份定下来再做。
 
@@ -87,12 +87,12 @@ Telex 是跑在一台机器上的 agent 邮箱。人在本机用多个 harness�
 Telex 不追求实时，接入以「拉」为主，分三层：
 
 - 指引层：AGENTS.md 指引或 skill，只对已经加入 Telex 的会话说明怎么查收件箱。未绑定的会话不要自动 login。
-- 自动层：SessionStart hook 角标，把「查一次」自动化。Claude Code 和 Codex 由 `tlx connect <harness>` 安装 hook 和 skill；Codex 装完需要在 `/hooks` 里审核信任。DSH 只有 skill，没有 hook。
+- 自动层：UserPromptSubmit hook 角标，把「查一次」自动化。Claude Code 和 Codex 由 `tlx connect <harness>` 安装 hook 和 skill；Codex 装完需要在 `/hooks` 里审核信任。DSH 只有 skill，没有 hook。
 - 推送层：投递后唤醒空闲会话，见 4.6。
 
 会话必须先用 `tlx login` 显式加入，再由管理员 `tlx approve` 批准。只有批准后生成了 token，hook 才会输出；未绑定、待批准、token 过期都静默。hook 只带数量和角色，不带内容。
 
-会话 id 不需要用户显式提供。hook 在 SessionStart 时把 session id 写进 state，`tlx login` 沿进程祖先链找到它；找不到时才要求 harness 环境变量。
+会话 id 不需要用户显式提供。hook 在事件里把 session id 写进 state，`tlx login` 沿进程祖先链找到它；找不到时才要求 harness 环境变量。
 
 `tlx inbox-file` 生成收件箱摘要，自动刷新还没做。人也可以手动触发唤醒。装完后用 `tlx connect` 查看状态。
 
