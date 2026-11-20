@@ -38,13 +38,6 @@ pub enum Disposition {
     Handoff,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum WakePolicy {
-    Poll,
-    Never,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,10 +51,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Disposition::Handoff).unwrap(),
             "\"handoff\""
-        );
-        assert_eq!(
-            serde_json::to_string(&WakePolicy::Never).unwrap(),
-            "\"never\""
         );
     }
 
