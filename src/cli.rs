@@ -296,9 +296,12 @@ struct ConnectArgs {
     /// Hook events for Claude Code and Codex, comma separated.
     #[arg(long, default_value = "SessionStart")]
     events: String,
-    /// Override the config file, or the skill file for dsh.
+    /// Override the config file.
     #[arg(long)]
     file: Option<PathBuf>,
+    /// Override the skill file when installing a skill.
+    #[arg(long)]
+    skill_file: Option<PathBuf>,
     /// Run a synthetic SessionStart payload after connecting.
     #[arg(long)]
     test: bool,
@@ -1243,6 +1246,9 @@ fn connect(home: &Paths, args: ConnectArgs) -> Result<()> {
             if args.write || !args.test {
                 connect_hook(&harness, &args)?;
             }
+            if args.write {
+                install_skill(&harness, &args)?;
+            }
             if args.test {
                 connect_test(home, &harness);
             }
@@ -1254,7 +1260,7 @@ fn connect(home: &Paths, args: ConnectArgs) -> Result<()> {
             if args.test {
                 bail!("--test applies to claude and codex hooks, not the dsh skill");
             }
-            connect_skill(&args)?;
+            install_skill("dsh", &args)?;
         }
         other => bail!("unknown harness: {other}. Use claude, codex, or dsh"),
     }
@@ -1371,6 +1377,17 @@ fn describe_hook_config(status: &HookConfigStatus) -> String {
     }
 }
 
+fn describe_skill_status(harness: &str, path: &Path, installed: bool) {
+    if installed {
+        println!("{harness} skill: {}（已安装）", path.display());
+    } else {
+        println!(
+            "{harness} skill: {}（未安装，运行 tlx connect {harness} --write）",
+            path.display()
+        );
+    }
+}
+
 fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
     let user_home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
     let codex_home = std::env::var_os("CODEX_HOME")
@@ -1378,8 +1395,12 @@ fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
         .unwrap_or_else(|| user_home.join(".codex"));
     let claude = read_hook_config_status("claude", &user_home.join(".claude/settings.json"));
     let codex = read_hook_config_status("codex", &codex_home.join("hooks.json"));
-    let dsh_skill_path = user_home.join(".dsh/skills/telex/SKILL.md");
-    let dsh_installed = dsh_skill_path.exists();
+    let claude_skill = user_home.join(".claude/skills/telex/SKILL.md");
+    let codex_skill = codex_home.join("skills/telex/SKILL.md");
+    let dsh_skill = user_home.join(".dsh/skills/telex/SKILL.md");
+    let claude_skill_installed = claude_skill.exists();
+    let codex_skill_installed = codex_skill.exists();
+    let dsh_skill_installed = dsh_skill.exists();
     let maild_ok = Client::new(home.clone())
         .call("hello", None, json!({}))
         .is_ok();
@@ -1392,16 +1413,20 @@ fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
                 "installed": claude.installed,
                 "binary": claude.binary,
                 "binary_ok": claude.binary_ok,
+                "skill_path": claude_skill.display().to_string(),
+                "skill_installed": claude_skill_installed,
             },
             "codex": {
                 "path": codex.path.display().to_string(),
                 "installed": codex.installed,
                 "binary": codex.binary,
                 "binary_ok": codex.binary_ok,
+                "skill_path": codex_skill.display().to_string(),
+                "skill_installed": codex_skill_installed,
             },
             "dsh_skill": {
-                "path": dsh_skill_path.display().to_string(),
-                "installed": dsh_installed,
+                "path": dsh_skill.display().to_string(),
+                "installed": dsh_skill_installed,
             },
             "maild_running": maild_ok,
             "initialized": initialized,
@@ -1411,15 +1436,10 @@ fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
     }
 
     println!("{}", describe_hook_config(&claude));
+    describe_skill_status("claude", &claude_skill, claude_skill_installed);
     println!("{}", describe_hook_config(&codex));
-    if dsh_installed {
-        println!("dsh skill: {}（已安装）", dsh_skill_path.display());
-    } else {
-        println!(
-            "dsh skill: {}（未安装，运行 tlx connect dsh --write）",
-            dsh_skill_path.display()
-        );
-    }
+    describe_skill_status("codex", &codex_skill, codex_skill_installed);
+    describe_skill_status("dsh", &dsh_skill, dsh_skill_installed);
     println!("maild: {}", if maild_ok { "运行中" } else { "未运行" });
     println!(
         "telex data: {}{}",
@@ -1570,34 +1590,47 @@ fn replace_placeholder(value: &mut Value, needle: &str, replacement: &str) {
     }
 }
 
-const DSH_SKILL: &str = include_str!("../assets/skills/telex/SKILL.md");
+const TELEX_SKILL: &str = include_str!("../assets/skills/telex/SKILL.md");
 
-fn connect_skill(args: &ConnectArgs) -> Result<()> {
+/// Install or print the Telex skill for a harness.
+///
+/// `claude` and `codex` read skills from `~/.claude/skills/` and
+/// `~/.codex/skills/` respectively.  `dsh` uses its own convention.
+fn install_skill(harness: &str, args: &ConnectArgs) -> Result<()> {
     if !args.write {
-        print!("{DSH_SKILL}");
+        print!("{TELEX_SKILL}");
         return Ok(());
     }
-    let target = args.file.clone().unwrap_or_else(|| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-            .join(".dsh")
-            .join("skills")
-            .join("telex")
-            .join("SKILL.md")
-    });
+    let user_home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+    let default_dir = match harness {
+        "claude" => user_home.join(".claude").join("skills"),
+        "codex" => std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| user_home.join(".codex"))
+            .join("skills"),
+        _ => user_home.join(".dsh").join("skills"),
+    };
+    let target = args
+        .skill_file
+        .clone()
+        .unwrap_or_else(|| default_dir.join("telex").join("SKILL.md"));
+    write_skill(&target)
+}
+
+fn write_skill(target: &std::path::Path) -> Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let existing = std::fs::read_to_string(&target).unwrap_or_default();
-    if existing == DSH_SKILL {
+    let existing = std::fs::read_to_string(target).unwrap_or_default();
+    if existing == TELEX_SKILL {
         println!("{} is up to date", target.display());
         return Ok(());
     }
     if !existing.is_empty() {
         std::fs::write(format!("{}.bak", target.display()), &existing).ok();
     }
-    std::fs::write(&target, DSH_SKILL)?;
-    println!("connected dsh: {}", target.display());
-    println!("重启 DSH 会话后生效。");
+    std::fs::write(target, TELEX_SKILL)?;
+    println!("skill: {}", target.display());
     Ok(())
 }
 

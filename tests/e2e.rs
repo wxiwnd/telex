@@ -352,6 +352,7 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
         r#"{"model":"keep-me","hooks":{"SessionStart":[]}}"#,
     )
     .expect("settings");
+    let skill_file = dir.path().join("claude-skill").join("SKILL.md");
 
     let out = run(
         &home,
@@ -364,6 +365,8 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
             "SessionStart,UserPromptSubmit,Stop",
             "--file",
             settings.to_str().unwrap(),
+            "--skill-file",
+            skill_file.to_str().unwrap(),
         ],
         None,
     );
@@ -380,6 +383,9 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
             "{event}: {command}"
         );
     }
+    let skill_text = std::fs::read_to_string(&skill_file).expect("skill file");
+    assert!(skill_text.contains("name: telex"), "frontmatter: {skill_text}");
+    assert!(skill_text.contains("tlx inbox-line"), "instruction: {skill_text}");
 
     let out = run(
         &home,
@@ -392,6 +398,8 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
             "SessionStart,UserPromptSubmit,Stop",
             "--file",
             settings.to_str().unwrap(),
+            "--skill-file",
+            skill_file.to_str().unwrap(),
         ],
         None,
     );
@@ -404,6 +412,8 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
         .filter(|entry| entry.to_string().contains("hook --event"))
         .count();
     assert_eq!(count, 1, "not idempotent");
+    let skill_second = std::fs::read_to_string(&skill_file).expect("skill file");
+    assert_eq!(skill_text, skill_second, "skill not idempotent");
 
     let agents = dir.path().join("AGENTS.md");
     let args = ["agents-md", "--write", "--file", agents.to_str().unwrap()];
@@ -809,6 +819,7 @@ fn connect_codex_writes_and_merges_idempotently() {
         r#"{"description":"keep me","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/bin/true"}]}]}}"#,
     )
     .expect("seed");
+    let skill_file = dir.path().join("codex-skill").join("SKILL.md");
 
     let out = run(
         &home,
@@ -821,6 +832,8 @@ fn connect_codex_writes_and_merges_idempotently() {
             "SessionStart,Stop",
             "--file",
             file.to_str().unwrap(),
+            "--skill-file",
+            skill_file.to_str().unwrap(),
         ],
         None,
     );
@@ -830,6 +843,8 @@ fn connect_codex_writes_and_merges_idempotently() {
         "trust reminder printed: {}",
         stdout(&out)
     );
+    let skill_text = std::fs::read_to_string(&skill_file).expect("skill file");
+    assert!(skill_text.contains("name: telex"), "frontmatter: {skill_text}");
 
     let value: Value =
         serde_json::from_str(&std::fs::read_to_string(&file).expect("read")).expect("json");
@@ -886,6 +901,8 @@ fn connect_codex_writes_and_merges_idempotently() {
             "SessionStart,Stop",
             "--file",
             file.to_str().unwrap(),
+            "--skill-file",
+            skill_file.to_str().unwrap(),
         ],
         None,
     );
@@ -902,6 +919,8 @@ fn connect_codex_writes_and_merges_idempotently() {
         .filter(|command| command.contains("hook --event"))
         .count();
     assert_eq!(telex_count, 1, "not idempotent");
+    let skill_second = std::fs::read_to_string(&skill_file).expect("skill file");
+    assert_eq!(skill_text, skill_second, "skill not idempotent");
 }
 
 #[test]
@@ -916,7 +935,7 @@ fn connect_dsh_writes_idempotently() {
         "connect".into(),
         "dsh".into(),
         "--write".into(),
-        "--file".into(),
+        "--skill-file".into(),
         target.to_string_lossy().to_string(),
     ];
     let arg_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
