@@ -32,9 +32,9 @@ cargo build --release
 接入 harness：
 
 ```bash
-./target/release/tlx connect claude --write   # Claude Code
-./target/release/tlx connect codex --write    # Codex，装完在 codex 里跑 /hooks 信任
-./target/release/tlx connect dsh --write      # DSH
+./target/release/tlx connect claude          # Claude Code
+./target/release/tlx connect codex           # Codex，装完在 codex 里跑 /hooks 信任
+./target/release/tlx connect dsh             # DSH
 ./target/release/tlx connect                  # 查看接入状态
 ```
 
