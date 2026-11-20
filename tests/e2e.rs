@@ -293,56 +293,6 @@ fn hook_prints_one_line_badge() {
 }
 
 #[test]
-fn wake_command_runs_on_delivery() {
-    let harness = Harness::new();
-    harness.add_role("lead@local");
-    let marker = harness.home.join("woke.txt");
-    let wake_cmd = format!(
-        "[\"/bin/sh\",\"-c\",\"echo {{count}} >> {}\"]",
-        marker.display()
-    );
-    let add = harness.run(
-        None,
-        &[
-            "role",
-            "add",
-            "wake@local",
-            "--wake-cmd",
-            &wake_cmd,
-            "--password-stdin",
-        ],
-        Some(PASSWORD),
-    );
-    assert!(add.status.success(), "role add: {}", stderr(&add));
-    harness.bind("session-wake", "wake@local");
-    harness.bind("session-lead", "lead@local");
-
-    let sent = harness.run(
-        Some("session-lead"),
-        &[
-            "send",
-            "--to",
-            "wake@local",
-            "--subject",
-            "wake",
-            "--body",
-            "now",
-            "--json",
-        ],
-        None,
-    );
-    assert!(sent.status.success(), "send: {}", stderr(&sent));
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !marker.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(marker.exists(), "wake command did not run");
-    let text = std::fs::read_to_string(marker).expect("marker");
-    assert_eq!(text.trim(), "1");
-}
-
-#[test]
 fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
     let dir = TempDir::new().expect("temp");
     let home = dir.path().join("home");
@@ -516,51 +466,11 @@ fn reply_all_keeps_cc_recipients_in_cc() {
 }
 
 #[test]
-fn wake_works_without_a_terminal_and_without_admin_password() {
-    let harness = Harness::new();
-    let marker = harness.home.join("manual-wake.txt");
-    let wake_cmd = format!(
-        "[\"/bin/sh\",\"-c\",\"echo {{count}} >> {}\"]",
-        marker.display()
-    );
-    let add = harness.run(
-        None,
-        &[
-            "role",
-            "add",
-            "waker@local",
-            "--wake-cmd",
-            &wake_cmd,
-            "--password-stdin",
-        ],
-        Some(PASSWORD),
-    );
-    assert!(add.status.success(), "role add: {}", stderr(&add));
-    harness.bind("session-waker", "waker@local");
-
-    let wake = harness.run(Some("session-waker"), &["wake"], None);
-    assert!(wake.status.success(), "wake: {}", stderr(&wake));
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !marker.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(marker.exists(), "manual wake command did not run");
-}
-
-#[test]
-fn role_list_does_not_leak_wake_commands_or_session_ids() {
+fn role_list_does_not_leak_session_ids() {
     let harness = Harness::new();
     let add = harness.run(
         None,
-        &[
-            "role",
-            "add",
-            "private@local",
-            "--wake-cmd",
-            "[\"/bin/true\"]",
-            "--password-stdin",
-        ],
+        &["role", "add", "private@local", "--password-stdin"],
         Some(PASSWORD),
     );
     assert!(add.status.success(), "role add: {}", stderr(&add));
@@ -570,7 +480,6 @@ fn role_list_does_not_leak_wake_commands_or_session_ids() {
     assert!(list.status.success(), "role list: {}", stderr(&list));
     let role = &json(&list)["roles"][0];
     assert!(role.get("session_id").is_none());
-    assert!(role.get("wake_cmd").is_none());
     assert_eq!(role["address"], "private@local");
 
     let admin_list = harness.run(
@@ -585,35 +494,6 @@ fn role_list_does_not_leak_wake_commands_or_session_ids() {
     );
     let role = &json(&admin_list)["roles"][0];
     assert_eq!(role["session_id"], "session-private");
-    assert!(role.get("wake_cmd").is_some());
-}
-
-#[test]
-fn a_session_cannot_wake_another_role() {
-    let harness = Harness::new();
-    harness.add_role("lead@local");
-    harness.add_role("worker@local");
-    harness.bind("session-lead", "lead@local");
-    harness.bind("session-worker", "worker@local");
-
-    let wake = harness.run(Some("session-lead"), &["wake", "worker@local"], None);
-    assert!(!wake.status.success(), "cross-role wake should fail");
-    let error = stderr(&wake);
-    assert!(
-        error.contains("own role") || error.contains("not_logged_in"),
-        "unexpected error: {error}"
-    );
-
-    let admin_wake = harness.run(
-        Some("session-lead"),
-        &["wake", "worker@local", "--password-stdin"],
-        Some(PASSWORD),
-    );
-    assert!(
-        admin_wake.status.success(),
-        "admin should be able to wake another role: {}",
-        stderr(&admin_wake)
-    );
 }
 
 #[test]

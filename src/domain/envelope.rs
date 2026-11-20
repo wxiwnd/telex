@@ -60,6 +60,8 @@ pub struct Envelope {
     pub priority: u8,
     #[serde(with = "rfc3339_ms_opt")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Reserved for harness-side notification policy. Telex does not execute
+    /// wake commands; the field stays in the wire format for compatibility.
     pub wake_policy: WakePolicy,
     pub payload: Option<Map<String, Value>>,
     pub body: Body,

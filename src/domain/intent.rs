@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Message intent. A closed enum that drives default behavior and wake policy.
+/// Message intent. A closed enum that drives default behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Intent {
