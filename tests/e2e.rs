@@ -851,6 +851,89 @@ fn connect_dsh_rejects_the_hook_file_flag() {
 }
 
 #[test]
+fn connect_agy_writes_hook_and_skill() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let hooks = home.join(".gemini/config/hooks.json");
+    std::fs::create_dir_all(hooks.parent().unwrap()).expect("hooks dir");
+    std::fs::write(
+        &hooks,
+        r#"{"other":{"Stop":[{"type":"command","command":"/bin/true"}]}}"#,
+    )
+    .expect("seed");
+
+    let out = run(&home, None, &["connect", "agy", "--yes"], None);
+    assert!(out.status.success(), "connect: {}", stderr(&out));
+
+    let value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks).expect("read")).expect("json");
+    assert_eq!(value["other"]["Stop"][0]["command"], "/bin/true");
+    let command = value["telex"]["PreInvocation"][0]["command"]
+        .as_str()
+        .expect("command");
+    assert!(command.contains("hook --event PreInvocation --harness agy"));
+    let skill = home.join(".gemini/config/skills/telex/SKILL.md");
+    assert!(skill.exists(), "skill missing");
+    assert!(
+        std::fs::read_to_string(skill)
+            .unwrap()
+            .contains("name: telex")
+    );
+
+    let out = run(&home, None, &["connect", "agy", "--yes"], None);
+    assert!(out.status.success(), "second connect: {}", stderr(&out));
+    let value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks).expect("read")).expect("json");
+    assert_eq!(value["telex"]["PreInvocation"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn agy_hook_returns_inject_steps() {
+    let harness = Harness::new();
+    harness.add_role("lead@local");
+    harness.add_role("worker@local");
+    harness.bind("session-lead", "lead@local");
+    harness.bind("session-worker", "worker@local");
+    let sent = harness.run(
+        Some("session-lead"),
+        &[
+            "send",
+            "--to",
+            "worker@local",
+            "--subject",
+            "hi",
+            "--body",
+            "there",
+            "--json",
+        ],
+        None,
+    );
+    assert!(sent.status.success(), "send: {}", stderr(&sent));
+
+    let out = harness.run(
+        None,
+        &["hook", "--event", "PreInvocation", "--harness", "agy"],
+        Some(r#"{"conversationId":"session-worker"}"#),
+    );
+    assert!(out.status.success(), "hook: {}", stderr(&out));
+    let value: Value = serde_json::from_str(&stdout(&out)).expect("hook json");
+    let message = value["injectSteps"][0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(message.contains("封未读"), "message: {message}");
+
+    let unbound = harness.run(
+        None,
+        &["hook", "--event", "PreInvocation", "--harness", "agy"],
+        Some(r#"{"conversationId":"ghost"}"#),
+    );
+    assert!(unbound.status.success());
+    let value: Value = serde_json::from_str(&stdout(&unbound)).expect("unbound json");
+    assert_eq!(value["injectSteps"], serde_json::json!([]));
+}
+
+#[test]
 fn connect_requires_confirmation_in_a_pipe() {
     let dir = TempDir::new().expect("temp");
     let home = dir.path().join("home");

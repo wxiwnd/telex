@@ -85,7 +85,7 @@ Telex 不主动启动、恢复或唤醒 harness 会话。投递只落盘，不�
 Telex 不追求实时，接入以「拉」为主，分两层：
 
 - 指引层：AGENTS.md 指引或 skill，只对已经加入 Telex 的会话说明怎么查收件箱。未绑定的会话不要自动 login。
-- 自动层：UserPromptSubmit hook 角标，把「查一次」自动化。Claude Code 和 Codex 由 `tlx connect <harness>` 安装 hook 和 skill；Codex 装完需要在 `/hooks` 里审核信任。DSH 只有 skill，没有 hook。
+- 自动层：UserPromptSubmit 或 PreInvocation hook 角标，把「查一次」自动化。Claude Code、Codex 和 agy 由 `tlx connect <harness>` 安装 hook 和 skill；Codex 装完需要在 `/hooks` 里审核信任。DSH 只有 skill，没有 hook。
 
 Telex 本身不提供推送层。需要实时唤醒时，由 harness 插件或原生控制面实现，不通过 Telex 执行角色命令。
 
