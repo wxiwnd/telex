@@ -589,6 +589,74 @@ fn init_rejects_an_invalid_domain() {
 }
 
 #[test]
+fn hook_only_notifies_for_new_unread() {
+    let harness = Harness::new();
+    harness.add_role("lead@local");
+    harness.add_role("worker@local");
+    harness.bind("session-lead", "lead@local");
+    harness.bind("session-worker", "worker@local");
+
+    let send = |subject: &str| {
+        let out = harness.run(
+            Some("session-lead"),
+            &[
+                "send",
+                "--to",
+                "worker@local",
+                "--subject",
+                subject,
+                "--body",
+                "body",
+                "--json",
+            ],
+            None,
+        );
+        assert!(out.status.success(), "send: {}", stderr(&out));
+        json(&out)["message_id"].as_str().unwrap().to_string()
+    };
+    let hook = || {
+        harness.run(
+            None,
+            &["hook", "--event", "UserPromptSubmit", "--harness", "claude"],
+            Some(r#"{"session_id":"session-worker"}"#),
+        )
+    };
+
+    let first = send("first");
+    let second = send("second");
+    let out = hook();
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("2 封未读"), "badge: {}", stdout(&out));
+
+    let out = hook();
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "", "same unread must not repeat");
+
+    let read = harness.run(Some("session-worker"), &["read", &first], None);
+    assert!(read.status.success(), "read: {}", stderr(&read));
+    let out = hook();
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "", "reading an old unread is not new mail");
+
+    let third = send("third");
+    let out = hook();
+    assert!(out.status.success());
+    assert!(
+        stdout(&out).contains("2 封未读"),
+        "new badge: {}",
+        stdout(&out)
+    );
+
+    for id in [second, third] {
+        let read = harness.run(Some("session-worker"), &["read", &id], None);
+        assert!(read.status.success(), "read: {}", stderr(&read));
+    }
+    let out = hook();
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "", "all read must stay silent");
+}
+
+#[test]
 fn hook_stays_silent_for_unbound_session() {
     let harness = Harness::new();
     for event in ["UserPromptSubmit", "Stop"] {

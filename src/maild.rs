@@ -478,8 +478,8 @@ fn mail_release(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, A
 fn mail_unread(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
     let store = store.lock().unwrap();
     let auth = require_auth(&store, request)?;
-    let count = guard(store.unread_count(&auth.role))?;
-    Ok(json!({"count": count, "role": auth.role}))
+    let ids = guard(store.unread_ids(&auth.role))?;
+    Ok(json!({"count": ids.len(), "role": auth.role, "ids": ids}))
 }
 
 fn mail_thread(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {

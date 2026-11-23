@@ -479,6 +479,7 @@ impl Store {
         write_private(&self.token_path(session_id), token.as_bytes())?;
         fs::remove_file(self.revoked_path(session_id)).ok();
         self.clear_session_notice(session_id);
+        self.clear_unread_notification(session_id);
         Ok(auth)
     }
 
@@ -503,6 +504,7 @@ impl Store {
         fs::remove_file(&auth_path).ok();
         fs::remove_file(&token_path).ok();
         self.clear_session_notice(session_id);
+        self.clear_unread_notification(session_id);
         if let Some(role_addr) = role {
             if let Some(mut role) = self.get_role(&role_addr)? {
                 if role.session_id.as_deref() == Some(session_id) {
@@ -1095,6 +1097,45 @@ impl Store {
     pub fn unread_count(&self, role: &str) -> Result<usize> {
         let entries = self.list(role, "new")?;
         Ok(entries.iter().filter(|entry| entry.unread).count())
+    }
+
+    pub fn unread_ids(&self, role: &str) -> Result<Vec<String>> {
+        let entries = self.list(role, "new")?;
+        Ok(entries
+            .into_iter()
+            .filter(|entry| entry.unread)
+            .map(|entry| entry.message_id)
+            .collect())
+    }
+
+    fn unread_notification_path(&self, session_id: &str) -> PathBuf {
+        self.paths
+            .hook_dir()
+            .join(format!("unread-{}.json", session_key(session_id)))
+    }
+
+    pub fn record_unread_notification(
+        &self,
+        session_id: &str,
+        current_ids: &[String],
+    ) -> Result<bool> {
+        if current_ids.is_empty() {
+            self.clear_unread_notification(session_id);
+            return Ok(false);
+        }
+        let previous: Vec<String> =
+            read_json(&self.unread_notification_path(session_id)).unwrap_or_default();
+        let previous: std::collections::HashSet<&str> =
+            previous.iter().map(String::as_str).collect();
+        let has_new = current_ids
+            .iter()
+            .any(|message_id| !previous.contains(message_id.as_str()));
+        write_json_atomic(&self.unread_notification_path(session_id), &current_ids)?;
+        Ok(has_new)
+    }
+
+    pub fn clear_unread_notification(&self, session_id: &str) {
+        fs::remove_file(self.unread_notification_path(session_id)).ok();
     }
 
     pub fn thread(&self, role: &str, thread_or_message: &str) -> Result<Vec<MailEntry>> {
