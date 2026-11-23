@@ -503,6 +503,35 @@ fn corrupt_index_falls_back_to_the_spool() {
 }
 
 #[test]
+fn doctor_detects_index_content_that_differs_at_the_same_count() {
+    let (_dir, store) = store();
+    let envelope = envelope("worker@local");
+    let message_id = envelope.message_id.to_string();
+    store
+        .deliver(&envelope, &["worker@local".into()])
+        .expect("deliver");
+
+    let path = store
+        .mailbox_dir("worker@local")
+        .join("new")
+        .join(format!("{message_id}.json"));
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+    value["subject"] = serde_json::json!("changed outside telex");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).expect("write");
+
+    let issues = store.doctor().expect("doctor");
+    assert!(
+        issues.iter().any(|issue| issue.code == "index_stale"),
+        "issues: {issues:?}"
+    );
+
+    store.index_rebuild().expect("rebuild");
+    let issues = store.doctor().expect("doctor");
+    assert!(!issues.iter().any(|issue| issue.code.starts_with("index_")));
+}
+
+#[test]
 fn doctor_reports_index_problems() {
     let (_dir, store) = store();
     let envelope = envelope("worker@local");
