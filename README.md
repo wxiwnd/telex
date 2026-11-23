@@ -39,6 +39,14 @@ cargo build --release
 ./target/release/tlx connect                  # 查看接入状态
 ```
 
+人查看某个角色的收件箱：
+
+```bash
+./target/release/tlx admin inbox worker@local --password-stdin
+./target/release/tlx admin read worker@local <MESSAGE_ID> --password-stdin
+# 默认只读，不写已读回执；要标记已读时加 --mark-seen
+```
+
 测试：`cargo test`。
 
 ## 数据位置

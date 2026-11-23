@@ -159,6 +159,10 @@ enum AdminSub {
     Requests(RequestsArgs),
     Passwd(PasswdArgs),
     Send(AdminSendArgs),
+    /// Read a role's inbox with the admin password.
+    Inbox(AdminInboxArgs),
+    /// Read one message from a role with the admin password.
+    Read(AdminReadArgs),
 }
 
 #[derive(Args)]
@@ -191,6 +195,30 @@ struct AdminSendArgs {
     from: String,
     #[command(flatten)]
     send: SendArgs,
+    #[arg(long)]
+    password_stdin: bool,
+}
+
+#[derive(Args)]
+struct AdminInboxArgs {
+    role: String,
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    password_stdin: bool,
+}
+
+#[derive(Args)]
+struct AdminReadArgs {
+    role: String,
+    message_id: String,
+    /// Write the role's seen marker. Default is read-only inspection.
+    #[arg(long)]
+    mark_seen: bool,
+    #[arg(long)]
+    json: bool,
     #[arg(long)]
     password_stdin: bool,
 }
@@ -730,6 +758,37 @@ fn admin(home: &Paths, cmd: AdminCmd) -> Result<()> {
             )?;
             print_send_result(&value, args.send.json);
         }
+        AdminSub::Inbox(args) => {
+            let password = read_password(args.password_stdin)?;
+            let domain = Store::new(home.clone()).config().domain;
+            let role = Address::parse(&args.role, &domain)?.to_string();
+            let value = rpc_admin(home, "admin.inbox", json!({"role": role}), &password)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                print_message_list(&value, "new", args.all);
+            }
+        }
+        AdminSub::Read(args) => {
+            let password = read_password(args.password_stdin)?;
+            let domain = Store::new(home.clone()).config().domain;
+            let role = Address::parse(&args.role, &domain)?.to_string();
+            let value = rpc_admin(
+                home,
+                "admin.read",
+                json!({
+                    "role": role,
+                    "message_id": args.message_id,
+                    "mark_seen": args.mark_seen,
+                }),
+                &password,
+            )?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                print_message(&value);
+            }
+        }
         AdminSub::Passwd(args) => {
             let (old, new) = if args.password_stdin || !std::io::stdin().is_terminal() {
                 let mut buffer = String::new();
@@ -930,6 +989,11 @@ fn list_folder(home: &Paths, folder: &str, args: InboxArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
+    print_message_list(&value, folder, args.all);
+    Ok(())
+}
+
+fn print_message_list(value: &Value, folder: &str, all: bool) {
     let messages = value["messages"].as_array().cloned().unwrap_or_default();
     let unread = messages
         .iter()
@@ -941,7 +1005,7 @@ fn list_folder(home: &Paths, folder: &str, args: InboxArgs) -> Result<()> {
         unread,
         messages.len()
     );
-    if !args.all {
+    if !all {
         let expired = messages
             .iter()
             .filter(|entry| entry["expired"].as_bool().unwrap_or(false))
@@ -951,7 +1015,7 @@ fn list_folder(home: &Paths, folder: &str, args: InboxArgs) -> Result<()> {
         }
     }
     for entry in messages {
-        if !args.all && entry["expired"].as_bool().unwrap_or(false) {
+        if !all && entry["expired"].as_bool().unwrap_or(false) {
             continue;
         }
         let flag = if entry["unread"].as_bool().unwrap_or(false) {
@@ -1009,7 +1073,6 @@ fn list_folder(home: &Paths, folder: &str, args: InboxArgs) -> Result<()> {
             entry["priority"].as_u64().unwrap_or(1)
         );
     }
-    Ok(())
 }
 
 fn read(home: &Paths, args: ReadArgs) -> Result<()> {
@@ -1022,6 +1085,11 @@ fn read(home: &Paths, args: ReadArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
+    print_message(&value);
+    Ok(())
+}
+
+fn print_message(value: &Value) {
     let envelope = &value["envelope"];
     println!(
         "From:     {}",
@@ -1064,7 +1132,6 @@ fn read(home: &Paths, args: ReadArgs) -> Result<()> {
     );
     println!();
     println!("{}", terminal_text(value["body"].as_str().unwrap_or("")));
-    Ok(())
 }
 
 fn terminal_text(value: &str) -> String {
