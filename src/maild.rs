@@ -168,7 +168,7 @@ fn revoked_or_missing(store: &Store, session_id: &str) -> ApiError {
     if store.was_revoked(session_id) {
         ApiError::new("session_revoked", "session is no longer bound to a role")
     } else {
-        ApiError::new("not_logged_in", "token invalid or expired")
+        ApiError::new("not_logged_in", "token invalid")
     }
 }
 
@@ -198,11 +198,7 @@ fn approve(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiErr
     let code = param_str(&request.params, "code")?;
     let pending = guard(store.take_pending(&code))?;
     let auth = guard(store.bind_session(&pending.role, &pending.session_id, &pending.harness))?;
-    Ok(json!({
-        "role": auth.role,
-        "session_id": auth.session_id,
-        "expires_at": auth.expires_at,
-    }))
+    Ok(json!({"role": auth.role, "session_id": auth.session_id}))
 }
 
 fn assign(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
@@ -219,7 +215,7 @@ fn assign(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiErro
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let auth = guard(store.bind_session(&role, &session_id, harness))?;
-    Ok(json!({"role": auth.role, "session_id": auth.session_id, "expires_at": auth.expires_at}))
+    Ok(json!({"role": auth.role, "session_id": auth.session_id}))
 }
 
 fn requests(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
@@ -319,7 +315,11 @@ fn admin_passwd(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, A
 fn whoami(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
     let store = store.lock().unwrap();
     let auth = require_auth(&store, request)?;
-    Ok(json!({"role": auth.role, "session_id": auth.session_id, "harness": auth.harness}))
+    Ok(json!({
+        "role": auth.role,
+        "session_id": auth.session_id,
+        "harness": auth.harness,
+    }))
 }
 
 fn logout(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {

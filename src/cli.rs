@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::client::Client;
 use crate::domain::{Address, Body, Envelope, Intent, MediaType};
 use crate::paths::Paths;
-use crate::store::Store;
+use crate::store::{SessionStatus, Store};
 
 #[derive(Parser)]
 #[command(name = "tlx", version, about = "Telex agent mailbox")]
@@ -569,16 +569,38 @@ fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
 }
 
 fn whoami(home: &Paths) -> Result<()> {
-    let session = session_id(home);
-    match rpc(home, "whoami", json!({})) {
-        Ok(value) => println!("{}", serde_json::to_string_pretty(&value)?),
-        Err(err) => {
-            if let Some(session) = session {
+    let Some(session) = session_id(home) else {
+        println!("no session id in environment");
+        return Ok(());
+    };
+    let store = Store::new(home.clone());
+    match store
+        .session_status(&session)
+        .unwrap_or(SessionStatus::Unbound)
+    {
+        SessionStatus::Bound { .. } => match rpc(home, "whoami", json!({})) {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value)?),
+            Err(err) => {
                 println!("session: {session}");
                 println!("role: not logged in ({err})");
-            } else {
-                println!("no session id in environment");
             }
+        },
+        SessionStatus::Pending { role } => {
+            println!("session: {session}");
+            println!("role: pending approval ({role})");
+        }
+        SessionStatus::Revoked { role } => {
+            println!("session: {session}");
+            println!("role: session revoked ({role})");
+            println!("run: tlx login {role}");
+        }
+        SessionStatus::RoleMissing { role } => {
+            println!("session: {session}");
+            println!("role: no longer exists ({role})");
+        }
+        SessionStatus::Unbound => {
+            println!("session: {session}");
+            println!("role: not logged in");
         }
     }
     Ok(())
@@ -631,8 +653,23 @@ fn role(home: &Paths, cmd: RoleCmd) -> Result<()> {
 fn login(home: &Paths, args: LoginArgs) -> Result<()> {
     let session =
         session_id(home).ok_or_else(|| anyhow!("no session id available; run inside a harness"))?;
-    let domain = Store::new(home.clone()).config().domain;
+    let store = Store::new(home.clone());
+    let domain = store.config().domain;
     let role = Address::parse(&args.role, &domain)?.to_string();
+    match store.session_status(&session)? {
+        SessionStatus::Bound { role: bound, .. } if bound == role => {
+            println!("already bound to {role}");
+            return Ok(());
+        }
+        SessionStatus::Pending { role: pending } if pending == role => {
+            if let Some(pending) = store.pending_for_session(&session)? {
+                println!("pairing code: {}", pending.code);
+                println!("ask the admin to run: tlx approve <code>");
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
     let value = rpc(
         home,
         "login",
@@ -1107,6 +1144,25 @@ fn hook_session(payload: &Value, home: &Paths) -> Option<String> {
         .or_else(|| session_id(home))
 }
 
+fn hook_notice(
+    store: &Store,
+    session: &str,
+    kind: &HookEventKind,
+    notice_kind: &str,
+    line: String,
+) -> HookOutcome {
+    if !matches!(kind, HookEventKind::UserPromptSubmit) {
+        return HookOutcome::empty();
+    }
+    if !store.mark_session_notice(session, notice_kind) {
+        return HookOutcome::empty();
+    }
+    HookOutcome {
+        stdout: vec![line],
+        stop_stderr: None,
+    }
+}
+
 /// Compute what the hook should print for one payload. Shared by the stdin
 /// entry point and `tlx connect --test`, so the fixture path exercises the same
 /// code as a real harness invocation.
@@ -1136,9 +1192,33 @@ fn evaluate_hook(
             .unwrap_or_default();
         let _ = store.record_session_handoff(&session, harness, &cwd);
     }
-    // A hook is inert until the session has been explicitly joined and the
-    // admin has approved it. Pending logins and unrelated harness sessions
-    // both have no token file, so they stay silent.
+    let status = store
+        .session_status(&session)
+        .unwrap_or(SessionStatus::Unbound);
+    match status {
+        SessionStatus::Bound { .. } => store.clear_session_notice(&session),
+        SessionStatus::Pending { .. } | SessionStatus::Unbound => {
+            return HookOutcome::empty();
+        }
+        SessionStatus::Revoked { role } => {
+            return hook_notice(
+                &store,
+                &session,
+                &kind,
+                "revoked",
+                format!("[Telex] session 已被撤销（{role}）。运行 `tlx login {role}` 重新绑定。"),
+            );
+        }
+        SessionStatus::RoleMissing { role } => {
+            return hook_notice(
+                &store,
+                &session,
+                &kind,
+                "role_missing",
+                format!("[Telex] 角色 {role} 已不存在。重新选择一个角色 login。"),
+            );
+        }
+    }
     let Some(token) = store.read_token_file(&session) else {
         return HookOutcome::empty();
     };

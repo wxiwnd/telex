@@ -23,7 +23,6 @@ use crate::process::ancestor_pids;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-pub const TOKEN_TTL_HOURS: i64 = 12;
 pub const PENDING_TTL_MINUTES: i64 = 5;
 const TMP_MAX_AGE_HOURS: i64 = 36;
 
@@ -74,7 +73,15 @@ pub struct Auth {
     pub harness: String,
     pub token_hash: String,
     pub created_at: String,
-    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionStatus {
+    Unbound,
+    Pending { role: String },
+    Bound { role: String },
+    Revoked { role: String },
+    RoleMissing { role: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -390,13 +397,68 @@ impl Store {
         let Some(auth) = self.auth_for_session(session_id)? else {
             return Ok(None);
         };
-        if parse_rfc3339(&auth.expires_at)? < Utc::now() {
-            return Ok(None);
-        }
         if auth.token_hash != token_hash(token) {
             return Ok(None);
         }
         Ok(Some(auth))
+    }
+
+    pub fn session_status(&self, session_id: &str) -> Result<SessionStatus> {
+        if let Some(auth) = self.auth_for_session(session_id)? {
+            if self.get_role(&auth.role)?.is_none() {
+                return Ok(SessionStatus::RoleMissing { role: auth.role });
+            }
+            return Ok(SessionStatus::Bound { role: auth.role });
+        }
+        if let Ok(revoked) = read_json::<RevokedSession>(&self.revoked_path(session_id)) {
+            return Ok(SessionStatus::Revoked { role: revoked.role });
+        }
+        if let Some(pending) = self.pending_for_session(session_id)? {
+            return Ok(SessionStatus::Pending { role: pending.role });
+        }
+        Ok(SessionStatus::Unbound)
+    }
+
+    pub fn pending_for_session(&self, session_id: &str) -> Result<Option<Pending>> {
+        let mut latest: Option<Pending> = None;
+        for entry in fs::read_dir(self.pending_dir())? {
+            let entry = entry?;
+            let Ok(pending) = read_json::<Pending>(&entry.path()) else {
+                continue;
+            };
+            if pending.session_id != session_id {
+                continue;
+            }
+            if parse_rfc3339(&pending.expires_at).is_ok_and(|expires| expires <= Utc::now()) {
+                fs::remove_file(entry.path()).ok();
+                continue;
+            }
+            if latest
+                .as_ref()
+                .is_none_or(|current| pending.created_at > current.created_at)
+            {
+                latest = Some(pending);
+            }
+        }
+        Ok(latest)
+    }
+
+    fn session_notice_path(&self, session_id: &str) -> PathBuf {
+        self.paths
+            .hook_dir()
+            .join(format!("notice-{}.json", session_key(session_id)))
+    }
+
+    pub fn mark_session_notice(&self, session_id: &str, kind: &str) -> bool {
+        let path = self.session_notice_path(session_id);
+        if read_json::<String>(&path).ok().as_deref() == Some(kind) {
+            return false;
+        }
+        write_json_atomic(&path, &kind.to_string()).is_ok()
+    }
+
+    pub fn clear_session_notice(&self, session_id: &str) {
+        fs::remove_file(self.session_notice_path(session_id)).ok();
     }
 
     pub fn was_revoked(&self, session_id: &str) -> bool {
@@ -412,11 +474,11 @@ impl Store {
             harness: harness.to_string(),
             token_hash: token_hash(&token),
             created_at: rfc3339(now),
-            expires_at: rfc3339(now + Duration::hours(TOKEN_TTL_HOURS)),
         };
         write_json_atomic(&self.auth_path(session_id), &auth)?;
         write_private(&self.token_path(session_id), token.as_bytes())?;
         fs::remove_file(self.revoked_path(session_id)).ok();
+        self.clear_session_notice(session_id);
         Ok(auth)
     }
 
@@ -440,6 +502,7 @@ impl Store {
         }
         fs::remove_file(&auth_path).ok();
         fs::remove_file(&token_path).ok();
+        self.clear_session_notice(session_id);
         if let Some(role_addr) = role {
             if let Some(mut role) = self.get_role(&role_addr)? {
                 if role.session_id.as_deref() == Some(session_id) {
