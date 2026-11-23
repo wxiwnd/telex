@@ -126,9 +126,7 @@ fn claim_is_exclusive_until_released() {
 #[test]
 fn binding_is_one_role_one_session_and_reassignment_revokes_old_token() {
     let (_dir, store) = store();
-    store
-        .add_role(&addr("worker@local"), None, vec![])
-        .expect("role");
+    store.add_role(&addr("worker@local"), None).expect("role");
 
     let first = store
         .bind_session("worker@local", "session-a", "claude")
@@ -275,12 +273,8 @@ fn bcc_recipients_see_the_thread_they_received() {
 #[test]
 fn one_session_can_only_represent_one_role() {
     let (_dir, store) = store();
-    store
-        .add_role(&addr("a@local"), None, vec![])
-        .expect("role a");
-    store
-        .add_role(&addr("b@local"), None, vec![])
-        .expect("role b");
+    store.add_role(&addr("a@local"), None).expect("role a");
+    store.add_role(&addr("b@local"), None).expect("role b");
 
     store
         .bind_session("a@local", "shared", "claude")
@@ -361,24 +355,6 @@ fn expired_messages_do_not_count_as_unread() {
     assert!(entries[0].expired);
     assert!(!entries[0].unread);
     assert_eq!(store.unread_count("worker@local").expect("count"), 0);
-}
-
-#[test]
-fn wake_failures_are_reported_by_doctor() {
-    let (_dir, store) = store();
-    store
-        .record_wake_failure("worker@local", "01ARZ3NDEKTSV4RRFFQ69G5FAV", 4, "exit 1")
-        .expect("record");
-    let issues = store.doctor().expect("doctor");
-    assert!(issues.iter().any(|issue| issue.code == "wake_failed"));
-    store.clear_wake_failure("worker@local");
-    assert!(
-        !store
-            .doctor()
-            .expect("doctor")
-            .iter()
-            .any(|issue| issue.code == "wake_failed")
-    );
 }
 
 #[test]

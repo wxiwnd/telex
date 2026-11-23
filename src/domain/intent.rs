@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Message intent. A closed enum that drives default behavior and wake policy.
+/// Message intent. A closed enum that drives default behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Intent {
@@ -38,13 +38,6 @@ pub enum Disposition {
     Handoff,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum WakePolicy {
-    Poll,
-    Never,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,10 +51,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Disposition::Handoff).unwrap(),
             "\"handoff\""
-        );
-        assert_eq!(
-            serde_json::to_string(&WakePolicy::Never).unwrap(),
-            "\"never\""
         );
     }
 

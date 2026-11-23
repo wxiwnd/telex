@@ -1,4 +1,4 @@
-//! Local daemon: auth, roles, mail operations and wake scheduling.
+//! Local daemon: auth, roles and mail operations.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -6,17 +6,15 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::domain::{Address, Envelope, WakePolicy};
+use crate::domain::{Address, Envelope};
 use crate::paths::Paths;
 use crate::protocol::{ApiError, PROTOCOL_VERSION, Request, Response};
 use crate::store::{DeliveryReport, Role, Store};
-
-const WAKE_TIMEOUT_SECS: u64 = 30;
 
 pub fn run(paths: Paths) -> Result<()> {
     let store = Store::new(paths);
@@ -102,7 +100,6 @@ fn dispatch(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiEr
         "mail.release" => mail_release(store, request),
         "mail.unread" => mail_unread(store, request),
         "mail.thread" => mail_thread(store, request),
-        "wake" => wake(store, request),
         "doctor" => doctor(store, request),
         "index.rebuild" => index_rebuild(store, request),
         other => Err(ApiError::new(
@@ -253,21 +250,7 @@ fn role_add(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiEr
             ));
         }
     }
-    let wake_cmd = match param(&request.params, "wake_cmd") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(|s| s.to_string())
-            .collect(),
-        Some(_) => {
-            return Err(ApiError::new(
-                "validation",
-                "wake_cmd must be a JSON array of strings",
-            ));
-        }
-    };
-    let role = guard(store.add_role(&address, display, wake_cmd))?;
+    let role = guard(store.add_role(&address, display))?;
     Ok(json!({"role": role}))
 }
 
@@ -347,20 +330,16 @@ fn logout(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiErro
 }
 
 fn mail_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store_arc = Arc::clone(store);
     let store = store.lock().unwrap();
     let auth = require_auth(&store, request)?;
     let role = guard(store.get_role(&auth.role))?
         .ok_or_else(|| ApiError::new("role_not_found", "role missing"))?;
     let envelope = parse_envelope(request)?;
     let sent = send_envelope(&store, envelope, &role)?;
-    drop(store);
-    finish_send(&store_arc, &sent);
     Ok(send_result_json(&sent))
 }
 
 fn admin_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store_arc = Arc::clone(store);
     let store = store.lock().unwrap();
     require_admin(&store, request)?;
     let from_raw = param_str(&request.params, "from")?;
@@ -370,14 +349,11 @@ fn admin_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Api
         .ok_or_else(|| ApiError::new("role_not_found", format!("role not found: {from}")))?;
     let envelope = parse_envelope(request)?;
     let sent = send_envelope(&store, envelope, &role)?;
-    drop(store);
-    finish_send(&store_arc, &sent);
     Ok(send_result_json(&sent))
 }
 
 struct Sent {
     report: DeliveryReport,
-    wake_targets: Vec<String>,
     envelope: Envelope,
 }
 
@@ -430,18 +406,7 @@ fn send_envelope(store: &Store, mut envelope: Envelope, role: &Role) -> Result<S
     }
 
     let report = guard(store.deliver(&envelope, &recipients))?;
-    let wake_targets: Vec<_> = envelope
-        .to
-        .iter()
-        .chain(envelope.bcc.iter())
-        .map(|address| address.to_string())
-        .filter(|address| report.delivered.contains(address))
-        .collect();
-    Ok(Sent {
-        report,
-        wake_targets,
-        envelope,
-    })
+    Ok(Sent { report, envelope })
 }
 
 fn error_text(errors: &[crate::domain::ValidationError]) -> String {
@@ -452,166 +417,12 @@ fn error_text(errors: &[crate::domain::ValidationError]) -> String {
         .join("; ")
 }
 
-fn finish_send(store: &Arc<Mutex<Store>>, sent: &Sent) {
-    for address in &sent.wake_targets {
-        maybe_wake(store, address.as_str(), &sent.envelope);
-    }
-}
-
 fn send_result_json(sent: &Sent) -> Value {
     json!({
         "delivered": sent.report.delivered,
         "duplicates": sent.report.duplicates,
         "message_id": sent.envelope.message_id.to_string(),
     })
-}
-
-fn maybe_wake(store: &Arc<Mutex<Store>>, role: &str, envelope: &Envelope) {
-    if envelope.wake_policy == WakePolicy::Never {
-        return;
-    }
-    if envelope
-        .expires_at
-        .is_some_and(|expires| expires <= chrono::Utc::now())
-    {
-        return;
-    }
-    let store = Arc::clone(store);
-    let role = role.to_string();
-    let message_id = envelope.message_id.to_string();
-    thread::spawn(move || wake_loop(store, role, message_id));
-}
-
-fn wake_loop(store: Arc<Mutex<Store>>, role: String, message_id: String) {
-    let (cmd, session, harness, count) = {
-        let store = store.lock().unwrap();
-        let Ok(Some(role_entry)) = store.get_role(&role) else {
-            store.clear_wake_failure(&role);
-            return;
-        };
-        let count = store.unread_count(&role).unwrap_or(0);
-        (
-            role_entry.wake_cmd.clone(),
-            role_entry.session_id.clone(),
-            role_entry.harness.clone(),
-            count,
-        )
-    };
-    let Some(session) = session else {
-        let store = store.lock().unwrap();
-        store.log_wake(&role, "skipped: role has no bound session");
-        return;
-    };
-    if cmd.is_empty() {
-        let store = store.lock().unwrap();
-        store.clear_wake_failure(&role);
-        return;
-    }
-
-    let seq = {
-        let store = store.lock().unwrap();
-        let mut state = store.wake_state(&role);
-        state.seq += 1;
-        state.last_at = Some(
-            chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                .to_string(),
-        );
-        let seq = state.seq;
-        let _ = store.save_wake_state(&role, &state);
-        seq
-    };
-
-    let delays = [0u64, 10, 60, 120];
-    let mut last_error = String::new();
-    for (attempt, delay) in delays.iter().enumerate() {
-        if *delay > 0 {
-            thread::sleep(Duration::from_secs(*delay));
-        }
-        let vars = [
-            ("address", role.clone()),
-            ("count", count.to_string()),
-            ("session_id", session.clone()),
-            ("harness", harness.clone().unwrap_or_default()),
-            ("seq", seq.to_string()),
-        ];
-        let args: Vec<String> = cmd.iter().map(|arg| substitute(arg, &vars)).collect();
-        let status = run_wake_command(&args, Duration::from_secs(WAKE_TIMEOUT_SECS));
-        let (ok, line, error) = match status {
-            Ok(Some(status)) if status.success() => (
-                true,
-                format!("attempt {} ok: {}", attempt + 1, args.join(" ")),
-                String::new(),
-            ),
-            Ok(Some(status)) => (
-                false,
-                format!(
-                    "attempt {} failed with {:?}: {}",
-                    attempt + 1,
-                    status.code(),
-                    args.join(" ")
-                ),
-                format!("exit code {:?}", status.code()),
-            ),
-            Ok(None) => (
-                false,
-                format!(
-                    "attempt {} timed out after {}s: {}",
-                    attempt + 1,
-                    WAKE_TIMEOUT_SECS,
-                    args.join(" ")
-                ),
-                format!("timed out after {WAKE_TIMEOUT_SECS}s"),
-            ),
-            Err(err) => (
-                false,
-                format!("attempt {} spawn error: {err}", attempt + 1),
-                format!("spawn error: {err}"),
-            ),
-        };
-        {
-            let store = store.lock().unwrap();
-            store.log_wake(&role, &line);
-        }
-        last_error = error;
-        if ok {
-            let store = store.lock().unwrap();
-            store.clear_wake_failure(&role);
-            return;
-        }
-    }
-    let store = store.lock().unwrap();
-    store.log_wake(&role, "wake_failed");
-    let _ = store.record_wake_failure(&role, &message_id, delays.len() as u32, &last_error);
-}
-
-fn run_wake_command(
-    args: &[String],
-    timeout: Duration,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let mut child = std::process::Command::new(&args[0])
-        .args(&args[1..])
-        .spawn()?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn substitute(template: &str, vars: &[(&str, String)]) -> String {
-    let mut out = template.to_string();
-    for (key, value) in vars {
-        out = out.replace(&format!("{{{key}}}"), value);
-    }
-    out
 }
 
 fn mail_list(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
@@ -677,38 +488,6 @@ fn mail_thread(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Ap
     let id = param_str(&request.params, "thread_id")?;
     let messages = guard(store.thread(&auth.role, &id))?;
     Ok(json!({"messages": messages}))
-}
-
-fn wake(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let raw = param_str(&request.params, "role")?;
-    let role = {
-        let store = store.lock().unwrap();
-        let domain = store.config().domain;
-        let role = guard(Address::parse(&raw, &domain).map_err(anyhow::Error::from))?.to_string();
-        if guard(store.get_role(&role))?.is_none() {
-            return Err(ApiError::new(
-                "role_not_found",
-                format!("role not found: {role}"),
-            ));
-        }
-        let auth = require_auth(&store, request);
-        let own_role = matches!(&auth, Ok(auth) if auth.role == role);
-        if !own_role {
-            if request.params.get("password").is_some() {
-                require_admin(&store, request)?;
-            } else {
-                return Err(match auth {
-                    Err(err) => err,
-                    Ok(_) => ApiError::new("not_logged_in", "can only wake your own role"),
-                });
-            }
-        }
-        role
-    };
-    let normalized = role.clone();
-    let store = Arc::clone(store);
-    thread::spawn(move || wake_loop(store, role, String::new()));
-    Ok(json!({"ok": true, "role": normalized}))
 }
 
 fn doctor(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {

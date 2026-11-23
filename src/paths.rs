@@ -114,10 +114,6 @@ impl Paths {
         self.state_dir.join("pending")
     }
 
-    pub fn wake_dir(&self) -> PathBuf {
-        self.state_dir.join("wake")
-    }
-
     pub fn hook_dir(&self) -> PathBuf {
         self.state_dir.join("hook")
     }

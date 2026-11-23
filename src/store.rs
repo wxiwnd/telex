@@ -49,8 +49,6 @@ pub struct Role {
     #[serde(default)]
     pub display: Option<String>,
     #[serde(default)]
-    pub wake_cmd: Vec<String>,
-    #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub harness: Option<String>,
@@ -77,14 +75,6 @@ pub struct Auth {
     pub token_hash: String,
     pub created_at: String,
     pub expires_at: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WakeState {
-    #[serde(default)]
-    pub seq: u64,
-    #[serde(default)]
-    pub last_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,15 +127,6 @@ pub struct DoctorIssue {
     pub code: String,
     pub message: String,
     pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WakeFailure {
-    pub role: String,
-    pub message_id: String,
-    pub attempts: u32,
-    pub error: String,
-    pub at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,7 +195,6 @@ impl Store {
             self.paths.auth_dir(),
             self.paths.tokens_dir(),
             self.paths.revoked_dir(),
-            self.paths.wake_dir(),
             self.paths.hook_dir(),
         ] {
             fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -301,19 +281,13 @@ impl Store {
         Ok(roles)
     }
 
-    pub fn add_role(
-        &self,
-        address: &Address,
-        display: Option<String>,
-        wake_cmd: Vec<String>,
-    ) -> Result<Role> {
+    pub fn add_role(&self, address: &Address, display: Option<String>) -> Result<Role> {
         if self.get_role(address.as_str())?.is_some() {
             bail!("role already exists: {address}");
         }
         let role = Role {
             address: address.to_string(),
             display,
-            wake_cmd,
             session_id: None,
             harness: None,
             bound_at: None,
@@ -1148,75 +1122,7 @@ impl Store {
         Ok(out)
     }
 
-    // ---------------------------------------------------------------- wake state
-
-    pub fn wake_state(&self, role: &str) -> WakeState {
-        read_json(
-            &self
-                .paths
-                .wake_dir()
-                .join(format!("{}.json", role_key(role))),
-        )
-        .unwrap_or_default()
-    }
-
-    pub fn save_wake_state(&self, role: &str, state: &WakeState) -> Result<()> {
-        write_json_atomic(
-            &self
-                .paths
-                .wake_dir()
-                .join(format!("{}.json", role_key(role))),
-            state,
-        )
-    }
-
-    pub fn log_wake(&self, role: &str, line: &str) {
-        let path = self
-            .paths
-            .wake_dir()
-            .join(format!("{}.log", role_key(role)));
-        if let Ok(mut file) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)
-        {
-            let _ = writeln!(file, "{} {}", now_rfc3339(), line);
-        }
-    }
-
-    fn wake_failure_path(&self, role: &str) -> PathBuf {
-        self.paths
-            .wake_dir()
-            .join(format!("{}.failed.json", role_key(role)))
-    }
-
-    pub fn record_wake_failure(
-        &self,
-        role: &str,
-        message_id: &str,
-        attempts: u32,
-        error: &str,
-    ) -> Result<()> {
-        let failure = WakeFailure {
-            role: role.to_string(),
-            message_id: message_id.to_string(),
-            attempts,
-            error: error.to_string(),
-            at: now_rfc3339(),
-        };
-        write_json_atomic(&self.wake_failure_path(role), &failure)
-    }
-
-    pub fn clear_wake_failure(&self, role: &str) {
-        fs::remove_file(self.wake_failure_path(role)).ok();
-    }
-
     pub fn clear_role_runtime(&self, role: &str) {
-        let name = role_key(role);
-        for suffix in ["json", "log", "failed.json"] {
-            fs::remove_file(self.paths.wake_dir().join(format!("{name}.{suffix}"))).ok();
-        }
         fs::remove_file(
             self.paths
                 .hook_dir()
@@ -1315,31 +1221,6 @@ impl Store {
                 message: "config.json is missing or unreadable".into(),
                 path: self.config_path().display().to_string(),
             });
-        }
-
-        if let Ok(entries) = fs::read_dir(self.paths.wake_dir()) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("json")
-                    || !path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.ends_with(".failed.json"))
-                {
-                    continue;
-                }
-                let Ok(failure) = read_json::<WakeFailure>(&path) else {
-                    continue;
-                };
-                issues.push(DoctorIssue {
-                    code: "wake_failed".into(),
-                    message: format!(
-                        "wake failed for {} after {} attempt(s): {}",
-                        failure.role, failure.attempts, failure.error
-                    ),
-                    path: path.display().to_string(),
-                });
-            }
         }
 
         let index_path = self.index_path();
@@ -1496,15 +1377,6 @@ fn safe_name(value: &str) -> String {
 fn session_key(value: &str) -> String {
     let filtered = safe_name(value);
     if filtered == value {
-        filtered
-    } else {
-        format!("{}-{}", filtered, &sha256_hex(value.as_bytes())[..12])
-    }
-}
-
-fn role_key(value: &str) -> String {
-    let filtered = safe_name(value);
-    if value.chars().count() <= 128 {
         filtered
     } else {
         format!("{}-{}", filtered, &sha256_hex(value.as_bytes())[..12])

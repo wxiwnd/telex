@@ -57,8 +57,6 @@ enum Commands {
     Claim(IdArgs),
     /// Release a claim.
     Release(IdArgs),
-    /// Run a role's wake command.
-    Wake(WakeArgs),
     /// Internal hook entry point. Reads hook JSON from stdin.
     #[command(hide = true)]
     Hook(HookArgs),
@@ -118,9 +116,6 @@ struct RoleAddArgs {
     address: String,
     #[arg(long)]
     display: Option<String>,
-    /// JSON array, for example '["codex","queue","--thread","{session_id}"]'.
-    #[arg(long)]
-    wake_cmd: Option<String>,
     #[arg(long)]
     password_stdin: bool,
 }
@@ -272,13 +267,6 @@ struct IdArgs {
 }
 
 #[derive(Args)]
-struct WakeArgs {
-    role: Option<String>,
-    #[arg(long)]
-    password_stdin: bool,
-}
-
-#[derive(Args)]
 struct HookArgs {
     #[arg(long, default_value = "UserPromptSubmit")]
     event: String,
@@ -387,7 +375,6 @@ pub fn run() -> Result<()> {
             json!({"message_id": args.message_id}),
             args.json,
         ),
-        Commands::Wake(args) => wake(&home, args),
         Commands::Hook(args) => hook(&home, args),
         Commands::Connect(args) => connect(&home, args),
         Commands::AgentsMd(args) => agents_md(args),
@@ -553,7 +540,7 @@ fn setup(home: &Paths, args: SetupArgs) -> Result<()> {
     let role_address = Address::parse(&role_input, &domain)?;
 
     store.init(&password, &domain)?;
-    let role = store.add_role(&role_address, None, Vec::new())?;
+    let role = store.add_role(&role_address, None)?;
 
     if args.json {
         println!(
@@ -601,16 +588,10 @@ fn role(home: &Paths, cmd: RoleCmd) -> Result<()> {
     match cmd.command {
         RoleSub::Add(args) => {
             let password = read_password(args.password_stdin)?;
-            let wake_cmd: Option<Value> = match args.wake_cmd {
-                Some(raw) => {
-                    Some(serde_json::from_str(&raw).context("wake-cmd must be a JSON array")?)
-                }
-                None => None,
-            };
             let value = rpc_admin(
                 home,
                 "role.add",
-                json!({"address": args.address, "display": args.display, "wake_cmd": wake_cmd}),
+                json!({"address": args.address, "display": args.display}),
                 &password,
             )?;
             println!("{}", serde_json::to_string_pretty(&value)?);
@@ -1086,28 +1067,6 @@ fn simple_rpc(home: &Paths, method: &str, params: Value, json_output: bool) -> R
     } else {
         println!("ok");
     }
-    Ok(())
-}
-
-fn wake(home: &Paths, args: WakeArgs) -> Result<()> {
-    let role = match args.role {
-        Some(role) => role,
-        None => {
-            let value = rpc(home, "whoami", json!({}))?;
-            value["role"].as_str().unwrap_or("").to_string()
-        }
-    };
-    if role.is_empty() {
-        bail!("no role");
-    }
-    let params = if args.password_stdin {
-        let password = read_password(true)?;
-        json!({"role": role, "password": password})
-    } else {
-        json!({"role": role})
-    };
-    let value = rpc(home, "wake", params)?;
-    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 

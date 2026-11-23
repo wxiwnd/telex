@@ -9,7 +9,7 @@ use ulid::Ulid;
 use crate::domain::address::Address;
 use crate::domain::body::Body;
 use crate::domain::canonical::{canonical_json, sha256_hex};
-use crate::domain::intent::{Disposition, Intent, WakePolicy};
+use crate::domain::intent::{Disposition, Intent};
 
 pub const VERSION: &str = "0.1";
 const MAX_SUBJECT: usize = 998;
@@ -60,7 +60,6 @@ pub struct Envelope {
     pub priority: u8,
     #[serde(with = "rfc3339_ms_opt")]
     pub expires_at: Option<DateTime<Utc>>,
-    pub wake_policy: WakePolicy,
     pub payload: Option<Map<String, Value>>,
     pub body: Body,
     pub dedupe_key: String,
@@ -123,7 +122,6 @@ impl Envelope {
             reply_expected: intent.expects_reply(),
             priority: 1,
             expires_at: None,
-            wake_policy: WakePolicy::Poll,
             payload: None,
             body: Body::from_text(body_text),
             dedupe_key: String::new(),
@@ -155,7 +153,6 @@ impl Envelope {
         envelope.disposition = Disposition::Reply;
         envelope.reply_expected = false;
         envelope.priority = parent.priority;
-        envelope.wake_policy = parent.wake_policy;
         envelope.dedupe_key = envelope.compute_dedupe_key();
         envelope
     }
