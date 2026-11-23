@@ -159,7 +159,9 @@ enum AdminSub {
     Requests(RequestsArgs),
     Passwd(PasswdArgs),
     Send(AdminSendArgs),
+    /// Read a role's inbox with the admin password.
     Inbox(AdminInboxArgs),
+    /// Read one message from a role with the admin password.
     Read(AdminReadArgs),
 }
 

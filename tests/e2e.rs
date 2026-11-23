@@ -384,7 +384,7 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
 }
 
 #[test]
-fn admin_can_read_a_role_without_marking_it_seen() {
+fn admin_read_does_not_mark_by_default_but_can_be_told_to() {
     let harness = Harness::new();
     harness.add_role("lead@local");
     harness.add_role("worker@local");
@@ -470,6 +470,13 @@ fn admin_can_read_a_role_without_marking_it_seen() {
     let worker_inbox = harness.run(Some("session-worker"), &["inbox", "--json"], None);
     assert!(worker_inbox.status.success());
     assert_eq!(json(&worker_inbox)["messages"][0]["unread"], false);
+
+    let sent_after_mark = harness.run(Some("session-lead"), &["sent", "--json"], None);
+    assert!(sent_after_mark.status.success());
+    assert!(
+        !json(&sent_after_mark)["messages"][0]["recipients"][0]["seen_at"].is_null(),
+        "marked admin read should create a receipt"
+    );
 }
 
 #[test]

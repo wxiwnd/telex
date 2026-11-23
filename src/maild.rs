@@ -496,18 +496,24 @@ fn mail_thread(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Ap
     Ok(json!({"messages": messages}))
 }
 
-fn admin_inbox(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
-    require_admin(&store, request)?;
-    let raw = param_str(&request.params, "role")?;
+fn admin_role(store: &Store, raw: &str) -> Result<String, ApiError> {
     let domain = store.config().domain;
-    let role = guard(Address::parse(&raw, &domain).map_err(anyhow::Error::from))?.to_string();
+    let role = Address::parse(raw, &domain)
+        .map_err(|err| ApiError::new("validation", err.to_string()))?
+        .to_string();
     if guard(store.get_role(&role))?.is_none() {
         return Err(ApiError::new(
             "role_not_found",
             format!("role not found: {role}"),
         ));
     }
+    Ok(role)
+}
+
+fn admin_inbox(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
+    let store = store.lock().unwrap();
+    require_admin(&store, request)?;
+    let role = admin_role(&store, &param_str(&request.params, "role")?)?;
     let messages = guard(store.list(&role, "new"))?;
     Ok(json!({"role": role, "messages": messages}))
 }
@@ -515,15 +521,7 @@ fn admin_inbox(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Ap
 fn admin_read(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
     let store = store.lock().unwrap();
     require_admin(&store, request)?;
-    let raw = param_str(&request.params, "role")?;
-    let domain = store.config().domain;
-    let role = guard(Address::parse(&raw, &domain).map_err(anyhow::Error::from))?.to_string();
-    if guard(store.get_role(&role))?.is_none() {
-        return Err(ApiError::new(
-            "role_not_found",
-            format!("role not found: {role}"),
-        ));
-    }
+    let role = admin_role(&store, &param_str(&request.params, "role")?)?;
     let message_id = param_str(&request.params, "message_id")?;
     let mark_seen = param_bool(&request.params, "mark_seen", false);
     let message = guard(store.read_message(&role, &message_id, mark_seen))?;
