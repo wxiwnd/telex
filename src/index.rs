@@ -181,6 +181,24 @@ impl MailIndex {
             .optional()?)
     }
 
+    pub fn find_dedupe(
+        &self,
+        mailbox: &str,
+        folder: &str,
+        dedupe_key: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT message_id FROM mail
+                 WHERE mailbox = ?1 AND folder = ?2 AND dedupe_key = ?3
+                 LIMIT 1",
+                params![mailbox, folder, dedupe_key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn has_copy(&self, mailbox: &str, message_id: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM mail

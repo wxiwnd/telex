@@ -66,6 +66,24 @@ fn duplicate_delivery_is_idempotent() {
 }
 
 #[test]
+fn same_content_with_a_new_message_id_is_a_duplicate() {
+    let (_dir, store) = store();
+    let first = envelope("worker@local");
+    store
+        .deliver(&first, &["worker@local".into()])
+        .expect("first");
+    let second = envelope("worker@local");
+    assert_ne!(first.message_id, second.message_id);
+    let report = store
+        .deliver(&second, &["worker@local".into()])
+        .expect("second");
+    assert!(report.delivered.is_empty());
+    assert_eq!(report.duplicates, vec!["worker@local".to_string()]);
+    assert_eq!(store.list("worker@local", "new").expect("inbox").len(), 1);
+    assert_eq!(store.list("lead@local", "sent").expect("sent").len(), 1);
+}
+
+#[test]
 fn same_message_id_with_different_content_conflicts() {
     let (_dir, store) = store();
     let envelope = envelope("worker@local");

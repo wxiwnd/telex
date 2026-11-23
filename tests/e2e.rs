@@ -147,6 +147,48 @@ fn json(output: &Output) -> Value {
 }
 
 #[test]
+fn sending_the_same_content_twice_is_idempotent() {
+    let harness = Harness::new();
+    harness.add_role("lead@local");
+    harness.add_role("worker@local");
+    harness.bind("session-lead", "lead@local");
+    harness.bind("session-worker", "worker@local");
+
+    let send = || {
+        harness.run(
+            Some("session-lead"),
+            &[
+                "send",
+                "--to",
+                "worker@local",
+                "--subject",
+                "same",
+                "--body",
+                "same body",
+                "--json",
+            ],
+            None,
+        )
+    };
+    let first = send();
+    assert!(first.status.success(), "first: {}", stderr(&first));
+    let second = send();
+    assert!(second.status.success(), "second: {}", stderr(&second));
+    assert_eq!(json(&second)["delivered"], serde_json::json!([]));
+    assert_eq!(
+        json(&second)["duplicates"],
+        serde_json::json!(["worker@local"])
+    );
+
+    let inbox = harness.run(Some("session-worker"), &["inbox", "--json"], None);
+    assert!(inbox.status.success());
+    assert_eq!(json(&inbox)["messages"].as_array().unwrap().len(), 1);
+    let sent = harness.run(Some("session-lead"), &["sent", "--json"], None);
+    assert!(sent.status.success());
+    assert_eq!(json(&sent)["messages"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn send_read_ack_and_read_receipt() {
     let harness = Harness::new();
     harness.add_role("lead@local");

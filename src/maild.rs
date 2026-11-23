@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,12 @@ use crate::domain::{Address, Envelope};
 use crate::paths::Paths;
 use crate::protocol::{ApiError, PROTOCOL_VERSION, Request, Response};
 use crate::store::{DeliveryReport, Role, Store};
+
+fn lock_store(store: &Arc<Mutex<Store>>) -> MutexGuard<'_, Store> {
+    store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -289,7 +295,7 @@ fn revoked_or_missing(store: &Store, session_id: &str) -> ApiError {
 }
 
 fn login(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let raw = param_str(&request.params, "role")?;
     let domain = store.config().domain;
     let role = guard(Address::parse(&raw, &domain).map_err(anyhow::Error::from))?.to_string();
@@ -309,7 +315,7 @@ fn login(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError
 }
 
 fn approve(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let code = param_str(&request.params, "code")?;
     let pending = guard(store.take_pending(&code))?;
@@ -318,7 +324,7 @@ fn approve(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiErr
 }
 
 fn assign(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let raw = param_str(&request.params, "role")?;
     let domain = store.config().domain;
@@ -335,14 +341,14 @@ fn assign(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiErro
 }
 
 fn requests(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let pending = guard(store.list_pending())?;
     Ok(json!({"requests": pending}))
 }
 
 fn role_add(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let raw = param_str(&request.params, "address")?;
     let domain = store.config().domain;
@@ -358,7 +364,7 @@ fn role_add(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiEr
 }
 
 fn role_list(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let has_password = request.params.get("password").is_some();
     let auth = require_auth(&store, request).ok();
     let is_admin = if has_password {
@@ -401,7 +407,7 @@ fn role_list(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiE
 }
 
 fn role_delete(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let role = role_param(&store, request)?;
     let role = guard(store.archive_role(&role))?;
@@ -409,7 +415,7 @@ fn role_delete(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Ap
 }
 
 fn role_update(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let role = role_param(&store, request)?;
     let display = param_str(&request.params, "display")?;
@@ -419,7 +425,7 @@ fn role_update(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Ap
 }
 
 fn role_restore(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let role = role_param(&store, request)?;
     let role = guard(store.restore_role(&role))?;
@@ -427,7 +433,7 @@ fn role_restore(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, A
 }
 
 fn role_purge(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let role = role_param(&store, request)?;
     guard(store.purge_role(&role))?;
@@ -455,7 +461,7 @@ fn validate_display(display: &str) -> Result<(), ApiError> {
 }
 
 fn admin_passwd(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let new_password = param_str(&request.params, "new_password")?;
     if new_password.chars().count() < 12 {
@@ -470,7 +476,7 @@ fn admin_passwd(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, A
 }
 
 fn whoami(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     Ok(json!({
         "role": auth.role,
@@ -480,14 +486,14 @@ fn whoami(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiErro
 }
 
 fn logout(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     guard(store.revoke_session(&auth.session_id))?;
     Ok(json!({"ok": true}))
 }
 
 fn mail_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     let role = guard(store.get_role(&auth.role))?
         .ok_or_else(|| ApiError::new("role_not_found", "role missing"))?;
@@ -497,7 +503,7 @@ fn mail_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiE
 }
 
 fn admin_send(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let from_raw = param_str(&request.params, "from")?;
     let domain = store.config().domain;
@@ -583,7 +589,7 @@ fn send_result_json(sent: &Sent) -> Value {
 }
 
 fn mail_list(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     let folder = param(&request.params, "folder")
         .and_then(Value::as_str)
@@ -593,7 +599,7 @@ fn mail_list(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiE
 }
 
 fn mail_read(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     let message_id = param_str(&request.params, "message_id")?;
     let mark_seen = param_bool(&request.params, "mark_seen", true);
@@ -613,7 +619,7 @@ fn read_message_json(message: crate::store::ReadMessage) -> Value {
 }
 
 fn mail_ack(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     let message_id = param_str(&request.params, "message_id")?;
     guard(store.ack(&auth.role, &message_id))?;
@@ -621,7 +627,7 @@ fn mail_ack(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiEr
 }
 
 fn mail_claim(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     let message_id = param_str(&request.params, "message_id")?;
     let claimed = guard(store.claim(&auth.role, &message_id))?;
@@ -629,7 +635,7 @@ fn mail_claim(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Api
 }
 
 fn mail_release(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     let message_id = param_str(&request.params, "message_id")?;
     let released = guard(store.release(&auth.role, &message_id))?;
@@ -637,14 +643,14 @@ fn mail_release(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, A
 }
 
 fn mail_unread(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     let ids = guard(store.unread_ids(&auth.role))?;
     Ok(json!({"count": ids.len(), "role": auth.role, "ids": ids}))
 }
 
 fn mail_thread(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     let auth = require_auth(&store, request)?;
     let id = param_str(&request.params, "thread_id")?;
     let messages = guard(store.thread(&auth.role, &id))?;
@@ -666,7 +672,7 @@ fn admin_role(store: &Store, raw: &str) -> Result<String, ApiError> {
 }
 
 fn admin_inbox(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let role = admin_role(&store, &param_str(&request.params, "role")?)?;
     let messages = guard(store.list(&role, "new"))?;
@@ -674,7 +680,7 @@ fn admin_inbox(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Ap
 }
 
 fn admin_read(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let role = admin_role(&store, &param_str(&request.params, "role")?)?;
     let message_id = param_str(&request.params, "message_id")?;
@@ -684,7 +690,7 @@ fn admin_read(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Api
 }
 
 fn doctor(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     if require_auth(&store, request).is_err() {
         require_admin(&store, request)?;
     }
@@ -693,8 +699,29 @@ fn doctor(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiErro
 }
 
 fn index_rebuild(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
-    let store = store.lock().unwrap();
+    let store = lock_store(store);
     require_admin(&store, request)?;
     let counts = guard(store.index_rebuild())?;
     Ok(counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+
+    #[test]
+    fn lock_store_recovers_from_a_poisoned_mutex() {
+        let dir = tempfile::TempDir::new().expect("temp");
+        let store = Arc::new(Mutex::new(Store::new(Paths::at_root(dir.path()))));
+        let poisoned = Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("lock");
+            panic!("poison the mutex");
+        })
+        .join();
+        assert!(store.is_poisoned());
+        let guard = lock_store(&store);
+        assert_eq!(guard.config_path().file_name().unwrap(), "config.json");
+    }
 }

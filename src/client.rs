@@ -11,7 +11,7 @@ use fs2::FileExt;
 use serde_json::Value;
 
 use crate::paths::Paths;
-use crate::protocol::{ApiError, Request, Response};
+use crate::protocol::{ApiError, PROTOCOL_VERSION, Request, Response};
 use crate::store::Store;
 
 pub struct Client {
@@ -113,6 +113,15 @@ impl Client {
             .map_err(|err| ApiError::new("timeout", err.to_string()))?;
         let response: Response = serde_json::from_str(response_line.trim())
             .map_err(|err| ApiError::new("protocol", err.to_string()))?;
+        if response.protocol != PROTOCOL_VERSION {
+            return Err(ApiError::new(
+                "protocol",
+                format!(
+                    "daemon protocol {} does not match client protocol {}",
+                    response.protocol, PROTOCOL_VERSION
+                ),
+            ));
+        }
         if response.ok {
             Ok(response.result.unwrap_or(Value::Null))
         } else {

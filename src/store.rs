@@ -740,6 +740,13 @@ impl Store {
             let mut copy = envelope.clone();
             copy.bcc.clear();
             copy.dedupe_key = copy.compute_dedupe_key();
+            if self
+                .find_dedupe(recipient, "new", &copy.dedupe_key)?
+                .is_some()
+            {
+                report.duplicates.push(recipient.clone());
+                continue;
+            }
             let path = self.message_path(recipient, "new", &copy.message_id.to_string());
             match self.write_message(&path, &copy)? {
                 WriteOutcome::Written => report.delivered.push(recipient.clone()),
@@ -751,19 +758,49 @@ impl Store {
                 &IndexedMessage::from_envelope(&copy, recipient, "new"),
             );
         }
-        let sent_path = self.message_path(
-            &envelope.from.address.to_string(),
-            "sent",
-            &envelope.message_id.to_string(),
-        );
-        if self.write_message(&sent_path, envelope)? == WriteOutcome::Conflict {
-            bail!("id-conflict in sent copy: {}", envelope.message_id);
+        let sender = envelope.from.address.to_string();
+        if self
+            .find_dedupe(&sender, "sent", &envelope.dedupe_key)?
+            .is_none()
+        {
+            let sent_path = self.message_path(&sender, "sent", &envelope.message_id.to_string());
+            if self.write_message(&sent_path, envelope)? == WriteOutcome::Conflict {
+                bail!("id-conflict in sent copy: {}", envelope.message_id);
+            }
+            self.index_upsert(
+                &mut index,
+                &IndexedMessage::from_envelope(envelope, &sender, "sent"),
+            );
         }
-        self.index_upsert(
-            &mut index,
-            &IndexedMessage::from_envelope(envelope, &envelope.from.address.to_string(), "sent"),
-        );
         Ok(report)
+    }
+
+    fn find_dedupe(&self, role: &str, folder: &str, key: &str) -> Result<Option<String>> {
+        if let Some(index) = self.open_index() {
+            match index.find_dedupe(role, folder, key) {
+                Ok(Some(message_id)) => return Ok(Some(message_id)),
+                Ok(None) => {}
+                Err(_) => {
+                    fs::remove_file(self.index_path()).ok();
+                }
+            }
+        }
+        let Ok(entries) = fs::read_dir(self.folder_dir(role, folder)) else {
+            return Ok(None);
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(envelope) = read_json::<Envelope>(&path) else {
+                continue;
+            };
+            if envelope.compute_dedupe_key() == key {
+                return Ok(Some(envelope.message_id.to_string()));
+            }
+        }
+        Ok(None)
     }
 
     fn open_index(&self) -> Option<MailIndex> {
