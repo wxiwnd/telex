@@ -276,11 +276,11 @@ struct HookArgs {
 
 #[derive(Args)]
 struct ConnectArgs {
-    /// claude, codex, or dsh. Omit to show connection status.
+    /// claude, codex, dsh, or agy. Omit to show connection status.
     harness: Option<String>,
-    /// Hook events for Claude Code and Codex, comma separated.
-    #[arg(long, default_value = "UserPromptSubmit")]
-    events: String,
+    /// Hook events for Claude Code, Codex, or agy, comma separated.
+    #[arg(long)]
+    events: Option<String>,
     /// Override the hook config file for Claude Code or Codex.
     #[arg(long)]
     file: Option<PathBuf>,
@@ -1078,7 +1078,7 @@ enum HookEventKind {
 
 fn hook_event_kind(name: &str) -> HookEventKind {
     match name.to_ascii_lowercase().as_str() {
-        "userpromptsubmit" => HookEventKind::UserPromptSubmit,
+        "userpromptsubmit" | "preinvocation" => HookEventKind::UserPromptSubmit,
         "stop" => HookEventKind::Stop,
         _ => HookEventKind::Other,
     }
@@ -1102,6 +1102,7 @@ fn hook_session(payload: &Value, home: &Paths) -> Option<String> {
     payload["session_id"]
         .as_str()
         .or_else(|| payload["thread_id"].as_str())
+        .or_else(|| payload["conversationId"].as_str())
         .map(|value| value.to_string())
         .or_else(|| session_id(home))
 }
@@ -1180,6 +1181,15 @@ fn hook(home: &Paths, args: HookArgs) -> Result<()> {
         .unwrap_or(&args.event)
         .to_string();
     let outcome = evaluate_hook(home, &payload, &event, &args.harness, true);
+    if args.harness == "agy" {
+        let steps: Vec<Value> = outcome
+            .stdout
+            .iter()
+            .map(|line| json!({"systemMessage": {"systemMessage": line}}))
+            .collect();
+        println!("{}", serde_json::to_string(&json!({"injectSteps": steps}))?);
+        return Ok(());
+    }
     for line in &outcome.stdout {
         println!("{line}");
     }
@@ -1202,6 +1212,7 @@ fn default_hook_path(harness: &str) -> Result<PathBuf> {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"))
             .join("hooks.json")),
+        "agy" => Ok(home.join(".gemini/config/hooks.json")),
         other => bail!("{other} has no hook config"),
     }
 }
@@ -1214,6 +1225,7 @@ fn skill_path(harness: &str) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"))
             .join("skills/telex/SKILL.md"),
+        "agy" => home.join(".gemini/config/skills/telex/SKILL.md"),
         _ => home.join(".dsh/skills/telex/SKILL.md"),
     }
 }
@@ -1221,42 +1233,58 @@ fn skill_path(harness: &str) -> PathBuf {
 fn connect(home: &Paths, args: ConnectArgs) -> Result<()> {
     let Some(raw_harness) = args.harness.as_deref() else {
         if args.test {
-            bail!("name a harness: claude, codex, or dsh");
+            bail!("name a harness: claude, codex, dsh, or agy");
         }
         return connect_status(home, args.json);
     };
     let harness = raw_harness.to_ascii_lowercase();
+    let default_events = if harness == "agy" {
+        "PreInvocation"
+    } else {
+        "UserPromptSubmit"
+    };
+    let events = args
+        .events
+        .clone()
+        .unwrap_or_else(|| default_events.to_string());
     let (hook_path, skill) = match harness.as_str() {
-        "claude" | "codex" => {
+        "claude" | "codex" | "agy" => {
             let hook = args
                 .file
                 .clone()
                 .map(Ok)
                 .unwrap_or_else(|| default_hook_path(&harness))?;
+            if harness == "agy" && events != "PreInvocation" {
+                bail!("agy uses PreInvocation, not {events}");
+            }
             (Some(hook), skill_path(&harness))
         }
         "dsh" => {
             if args.file.is_some() {
                 bail!("dsh has no hook config; --file is not supported");
             }
-            if args.events != "UserPromptSubmit" {
+            if events != "UserPromptSubmit" {
                 bail!("dsh uses a skill, not hook events");
             }
             if args.test {
-                bail!("--test applies to claude and codex hooks, not the dsh skill");
+                bail!("--test applies to claude, codex, and agy hooks, not the dsh skill");
             }
             (None, skill_path("dsh"))
         }
-        other => bail!("unknown harness: {other}. Use claude, codex, or dsh"),
+        other => bail!("unknown harness: {other}. Use claude, codex, dsh, or agy"),
     };
 
-    if !confirm_connect(hook_path.as_deref(), &skill, &args.events, args.yes)? {
+    if !confirm_connect(hook_path.as_deref(), &skill, &events, args.yes)? {
         println!("cancelled");
         return Ok(());
     }
 
     if let Some(hook) = &hook_path {
-        install_hook(&harness, hook, &args.events)?;
+        if harness == "agy" {
+            install_agy_hook(hook, &events)?;
+        } else {
+            install_hook(&harness, hook, &events)?;
+        }
     }
     install_skill(&harness)?;
     if args.test {
@@ -1289,13 +1317,27 @@ fn confirm_connect(hook: Option<&Path>, skill: &Path, events: &str, yes: bool) -
 
 fn connect_test(home: &Paths, harness: &str) {
     let session = format!("tlx-connect-test-{harness}");
-    let payload = json!({
-        "session_id": session,
-        "hook_event_name": "UserPromptSubmit",
-        "cwd": ".",
-    });
-    let outcome = evaluate_hook(home, &payload, "UserPromptSubmit", harness, false);
-    println!("event: UserPromptSubmit");
+    let (event, payload) = if harness == "agy" {
+        (
+            "PreInvocation",
+            json!({
+                "conversationId": session,
+                "lastUserInput": "connect test",
+                "workspacePaths": ["."],
+            }),
+        )
+    } else {
+        (
+            "UserPromptSubmit",
+            json!({
+                "session_id": session,
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": ".",
+            }),
+        )
+    };
+    let outcome = evaluate_hook(home, &payload, event, harness, false);
+    println!("event: {event}");
     println!("session: {session}");
     if outcome.stdout.is_empty() && outcome.stop_stderr.is_none() {
         println!("output: (none)");
@@ -1374,6 +1416,32 @@ fn extract_command_binary(command: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+fn read_agy_hook_status(path: &Path) -> HookConfigStatus {
+    let mut status = HookConfigStatus {
+        name: "agy",
+        path: path.to_path_buf(),
+        installed: false,
+        binary: None,
+        binary_ok: false,
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return status;
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+        return status;
+    };
+    let Some(command) = doc["telex"]["PreInvocation"][0]["command"].as_str() else {
+        return status;
+    };
+    status.installed = command.contains("hook --event PreInvocation --harness agy");
+    status.binary = extract_command_binary(command);
+    status.binary_ok = status
+        .binary
+        .as_ref()
+        .is_some_and(|binary| Path::new(binary).exists());
+    status
+}
+
 fn describe_hook_config(status: &HookConfigStatus) -> String {
     if !status.path.exists() || !status.installed {
         format!(
@@ -1411,11 +1479,14 @@ fn describe_skill_status(harness: &str, path: &Path, installed: bool) {
 fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
     let claude = read_hook_config_status("claude", &default_hook_path("claude")?);
     let codex = read_hook_config_status("codex", &default_hook_path("codex")?);
+    let agy = read_agy_hook_status(&default_hook_path("agy")?);
     let claude_skill = skill_path("claude");
     let codex_skill = skill_path("codex");
+    let agy_skill = skill_path("agy");
     let dsh_skill = skill_path("dsh");
     let claude_skill_installed = claude_skill.exists();
     let codex_skill_installed = codex_skill.exists();
+    let agy_skill_installed = agy_skill.exists();
     let dsh_skill_installed = dsh_skill.exists();
     let maild_ok = Client::new(home.clone())
         .call("hello", None, json!({}))
@@ -1440,6 +1511,14 @@ fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
                 "skill_path": codex_skill.display().to_string(),
                 "skill_installed": codex_skill_installed,
             },
+            "agy": {
+                "path": agy.path.display().to_string(),
+                "installed": agy.installed,
+                "binary": agy.binary,
+                "binary_ok": agy.binary_ok,
+                "skill_path": agy_skill.display().to_string(),
+                "skill_installed": agy_skill_installed,
+            },
             "dsh_skill": {
                 "path": dsh_skill.display().to_string(),
                 "installed": dsh_skill_installed,
@@ -1455,6 +1534,8 @@ fn connect_status(home: &Paths, json_output: bool) -> Result<()> {
     describe_skill_status("claude", &claude_skill, claude_skill_installed);
     println!("{}", describe_hook_config(&codex));
     describe_skill_status("codex", &codex_skill, codex_skill_installed);
+    println!("{}", describe_hook_config(&agy));
+    describe_skill_status("agy", &agy_skill, agy_skill_installed);
     describe_skill_status("dsh", &dsh_skill, dsh_skill_installed);
     println!("maild: {}", if maild_ok { "运行中" } else { "未运行" });
     println!(
@@ -1496,6 +1577,34 @@ fn hook_command_path() -> String {
     std::env::current_exe()
         .map(|path| format!("\"{}\"", path.display()))
         .unwrap_or_else(|_| "tlx".to_string())
+}
+
+fn install_agy_hook(file: &Path, events: &str) -> Result<()> {
+    if events != "PreInvocation" {
+        bail!("agy uses PreInvocation, not {events}");
+    }
+    let command = format!(
+        "{} hook --event PreInvocation --harness agy",
+        hook_command_path()
+    );
+    let handler = json!({"type": "command", "command": command, "timeout": 10});
+    let mut doc: Value = std::fs::read_to_string(file)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if file.exists() {
+        std::fs::write(file.with_extension("json.bak"), std::fs::read(file)?).ok();
+    }
+    let object = doc
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("hooks file is not an object"))?;
+    object.insert("telex".to_string(), json!({"PreInvocation": [handler]}));
+    std::fs::write(file, serde_json::to_string_pretty(&doc)? + "\n")?;
+    println!("hook: {}", file.display());
+    Ok(())
 }
 
 fn install_hook(harness: &str, file: &Path, events: &str) -> Result<()> {
