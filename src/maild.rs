@@ -37,6 +37,39 @@ fn install_signal_handlers() {
     }
 }
 
+struct ActiveGuard {
+    active: Arc<AtomicUsize>,
+    last_activity: Arc<Mutex<Instant>>,
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        if let Ok(mut last) = self.last_activity.lock() {
+            *last = Instant::now();
+        }
+    }
+}
+
+fn spawn_connection(
+    stream: UnixStream,
+    store: Arc<Mutex<Store>>,
+    active: Arc<AtomicUsize>,
+    last_activity: Arc<Mutex<Instant>>,
+) {
+    active.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut last) = last_activity.lock() {
+        *last = Instant::now();
+    }
+    thread::spawn(move || {
+        let _guard = ActiveGuard {
+            active: Arc::clone(&active),
+            last_activity: Arc::clone(&last_activity),
+        };
+        let _ = handle(store, stream);
+    });
+}
+
 pub fn run(paths: Paths, idle_timeout_secs: u64) -> Result<()> {
     let store = Store::new(paths);
     if !store.config_path().exists() {
@@ -62,29 +95,23 @@ pub fn run(paths: Paths, idle_timeout_secs: u64) -> Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     let last_activity = Arc::new(Mutex::new(Instant::now()));
     let idle_timeout = Duration::from_secs(idle_timeout_secs);
+    let mut accept_error: Option<std::io::Error> = None;
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
         }
         match listener.accept() {
-            Ok((stream, _)) => {
-                active.fetch_add(1, Ordering::SeqCst);
-                if let Ok(mut last) = last_activity.lock() {
-                    *last = Instant::now();
-                }
-                let store = Arc::clone(&store);
-                let active = Arc::clone(&active);
-                let last_activity = Arc::clone(&last_activity);
-                thread::spawn(move || {
-                    let _ = handle(store, stream);
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    if let Ok(mut last) = last_activity.lock() {
-                        *last = Instant::now();
-                    }
-                });
-            }
+            Ok((stream, _)) => spawn_connection(
+                stream,
+                Arc::clone(&store),
+                Arc::clone(&active),
+                Arc::clone(&last_activity),
+            ),
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(err) => return Err(err).context("accept maild connection"),
+            Err(err) => {
+                accept_error = Some(err);
+                break;
+            }
         }
         if !idle_timeout.is_zero() && active.load(Ordering::SeqCst) == 0 {
             let idle = last_activity
@@ -92,7 +119,23 @@ pub fn run(paths: Paths, idle_timeout_secs: u64) -> Result<()> {
                 .map(|last| last.elapsed() >= idle_timeout)
                 .unwrap_or(false);
             if idle {
-                break;
+                // Don't race a client that connected just before the check.
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        spawn_connection(
+                            stream,
+                            Arc::clone(&store),
+                            Arc::clone(&active),
+                            Arc::clone(&last_activity),
+                        );
+                        continue;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) => {
+                        accept_error = Some(err);
+                        break;
+                    }
+                }
             }
         }
         thread::sleep(Duration::from_millis(100));
@@ -103,6 +146,9 @@ pub fn run(paths: Paths, idle_timeout_secs: u64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     while active.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
+    }
+    if let Some(err) = accept_error {
+        return Err(err).context("accept maild connection");
     }
     Ok(())
 }
