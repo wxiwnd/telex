@@ -384,6 +384,95 @@ fn connect_claude_merges_without_clobbering_and_agents_md_is_idempotent() {
 }
 
 #[test]
+fn admin_can_read_a_role_without_marking_it_seen() {
+    let harness = Harness::new();
+    harness.add_role("lead@local");
+    harness.add_role("worker@local");
+    harness.bind("session-lead", "lead@local");
+    harness.bind("session-worker", "worker@local");
+    let sent = harness.run(
+        Some("session-lead"),
+        &[
+            "send",
+            "--to",
+            "worker@local",
+            "--subject",
+            "for admin",
+            "--body",
+            "inspect",
+            "--json",
+        ],
+        None,
+    );
+    assert!(sent.status.success(), "send: {}", stderr(&sent));
+    let message_id = json(&sent)["message_id"].as_str().unwrap().to_string();
+
+    let inbox = harness.run(
+        None,
+        &[
+            "admin",
+            "inbox",
+            "worker@local",
+            "--json",
+            "--password-stdin",
+        ],
+        Some(PASSWORD),
+    );
+    assert!(inbox.status.success(), "admin inbox: {}", stderr(&inbox));
+    assert_eq!(json(&inbox)["messages"].as_array().unwrap().len(), 1);
+
+    let read = harness.run(
+        None,
+        &[
+            "admin",
+            "read",
+            "worker@local",
+            &message_id,
+            "--json",
+            "--password-stdin",
+        ],
+        Some(PASSWORD),
+    );
+    assert!(read.status.success(), "admin read: {}", stderr(&read));
+    assert_eq!(json(&read)["seen"], false);
+
+    let worker_inbox = harness.run(Some("session-worker"), &["inbox", "--json"], None);
+    assert!(worker_inbox.status.success());
+    assert_eq!(json(&worker_inbox)["messages"][0]["unread"], true);
+
+    let sent_after = harness.run(Some("session-lead"), &["sent", "--json"], None);
+    assert!(sent_after.status.success());
+    assert!(
+        json(&sent_after)["messages"][0]["recipients"][0]["seen_at"].is_null(),
+        "admin read must not create a receipt"
+    );
+
+    let marked = harness.run(
+        None,
+        &[
+            "admin",
+            "read",
+            "worker@local",
+            &message_id,
+            "--mark-seen",
+            "--json",
+            "--password-stdin",
+        ],
+        Some(PASSWORD),
+    );
+    assert!(
+        marked.status.success(),
+        "admin marked read: {}",
+        stderr(&marked)
+    );
+    assert_eq!(json(&marked)["seen"], true);
+
+    let worker_inbox = harness.run(Some("session-worker"), &["inbox", "--json"], None);
+    assert!(worker_inbox.status.success());
+    assert_eq!(json(&worker_inbox)["messages"][0]["unread"], false);
+}
+
+#[test]
 fn admin_can_send_mail_without_a_bound_session() {
     let harness = Harness::new();
     harness.add_role("lead@local");

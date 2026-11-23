@@ -93,6 +93,8 @@ fn dispatch(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiEr
         "logout" => logout(store, request),
         "mail.send" => mail_send(store, request),
         "admin.send" => admin_send(store, request),
+        "admin.inbox" => admin_inbox(store, request),
+        "admin.read" => admin_read(store, request),
         "mail.list" => mail_list(store, request),
         "mail.read" => mail_read(store, request),
         "mail.ack" => mail_ack(store, request),
@@ -441,14 +443,18 @@ fn mail_read(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiE
     let message_id = param_str(&request.params, "message_id")?;
     let mark_seen = param_bool(&request.params, "mark_seen", true);
     let message = guard(store.read_message(&auth.role, &message_id, mark_seen))?;
-    Ok(json!({
+    Ok(read_message_json(message))
+}
+
+fn read_message_json(message: crate::store::ReadMessage) -> Value {
+    json!({
         "envelope": message.envelope,
         "body": message.body,
         "seen": message.seen,
         "acked": message.acked,
         "folder": message.folder,
         "path": message.path,
-    }))
+    })
 }
 
 fn mail_ack(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
@@ -488,6 +494,40 @@ fn mail_thread(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, Ap
     let id = param_str(&request.params, "thread_id")?;
     let messages = guard(store.thread(&auth.role, &id))?;
     Ok(json!({"messages": messages}))
+}
+
+fn admin_inbox(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
+    let store = store.lock().unwrap();
+    require_admin(&store, request)?;
+    let raw = param_str(&request.params, "role")?;
+    let domain = store.config().domain;
+    let role = guard(Address::parse(&raw, &domain).map_err(anyhow::Error::from))?.to_string();
+    if guard(store.get_role(&role))?.is_none() {
+        return Err(ApiError::new(
+            "role_not_found",
+            format!("role not found: {role}"),
+        ));
+    }
+    let messages = guard(store.list(&role, "new"))?;
+    Ok(json!({"role": role, "messages": messages}))
+}
+
+fn admin_read(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
+    let store = store.lock().unwrap();
+    require_admin(&store, request)?;
+    let raw = param_str(&request.params, "role")?;
+    let domain = store.config().domain;
+    let role = guard(Address::parse(&raw, &domain).map_err(anyhow::Error::from))?.to_string();
+    if guard(store.get_role(&role))?.is_none() {
+        return Err(ApiError::new(
+            "role_not_found",
+            format!("role not found: {role}"),
+        ));
+    }
+    let message_id = param_str(&request.params, "message_id")?;
+    let mark_seen = param_bool(&request.params, "mark_seen", false);
+    let message = guard(store.read_message(&role, &message_id, mark_seen))?;
+    Ok(read_message_json(message))
 }
 
 fn doctor(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
