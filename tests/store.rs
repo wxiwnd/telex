@@ -260,6 +260,22 @@ fn session_status_distinguishes_unbound_pending_bound_expired_revoked() {
 }
 
 #[test]
+fn thread_fallback_preserves_unread_state() {
+    let (_dir, store) = store();
+    let parent = envelope("worker@local");
+    let id = parent.message_id.to_string();
+    store
+        .deliver(&parent, &["worker@local".into()])
+        .expect("deliver");
+    std::fs::remove_file(store.index_path()).expect("remove index");
+
+    let thread = store.thread("worker@local", &id).expect("thread");
+    assert_eq!(thread.len(), 1);
+    assert!(thread[0].unread);
+    assert!(thread[0].path.contains("/worker@local/new/"));
+}
+
+#[test]
 fn thread_includes_participants_only() {
     let (_dir, store) = store();
     let parent = envelope("worker@local");
@@ -484,6 +500,26 @@ fn sqlite_index_lists_messages_and_rebuilds() {
     assert_eq!(counts["indexed"], 2);
     assert!(store.index_path().exists());
     assert_eq!(store.list("worker@local", "new").expect("list").len(), 1);
+}
+
+#[test]
+fn missing_spool_file_invalidates_the_index() {
+    let (_dir, store) = store();
+    let envelope = envelope("worker@local");
+    let id = envelope.message_id.to_string();
+    store
+        .deliver(&envelope, &["worker@local".into()])
+        .expect("deliver");
+    std::fs::remove_file(
+        store
+            .mailbox_dir("worker@local")
+            .join("new")
+            .join(format!("{id}.json")),
+    )
+    .expect("remove spool file");
+
+    assert!(store.list("worker@local", "new").expect("list").is_empty());
+    assert!(!store.index_path().exists(), "stale index was removed");
 }
 
 #[test]

@@ -77,7 +77,7 @@ cargo build --release
 整体架构如下图所示：
 
 ```
-Claude Code / Codex / DSH
+Claude Code / Codex / DSH / AGY
   ├── tlx CLI
   └── tlx hook
           │ Unix socket，NDJSON

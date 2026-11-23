@@ -34,6 +34,10 @@ fn install_signal_handlers() {
             libc::SIGTERM,
             request_shutdown as *const () as libc::sighandler_t,
         );
+        libc::signal(
+            libc::SIGHUP,
+            request_shutdown as *const () as libc::sighandler_t,
+        );
     }
 }
 

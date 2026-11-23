@@ -1452,6 +1452,38 @@ fn agy_hook_returns_inject_steps() {
 }
 
 #[test]
+fn connect_refuses_to_overwrite_corrupt_hook_config() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let settings = dir.path().join("settings.json");
+    std::fs::write(&settings, "{not json").expect("settings");
+
+    let out = run(
+        &home,
+        None,
+        &[
+            "connect",
+            "claude",
+            "--yes",
+            "--file",
+            settings.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("parse") || stderr(&out).contains("settings.json"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("settings"),
+        "{not json"
+    );
+}
+
+#[test]
 fn connect_requires_confirmation_in_a_pipe() {
     let dir = TempDir::new().expect("temp");
     let home = dir.path().join("home");

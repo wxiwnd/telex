@@ -376,33 +376,34 @@ impl Store {
         self.clear_claims_for(address)?;
         self.remove_pending_for_role(address)?;
         self.clear_role_runtime(address);
-        fs::remove_dir_all(self.mailbox_dir(address)).ok();
-        self.remove_role_markers(address);
-        fs::remove_file(self.role_path(address)).ok();
-        fs::remove_file(self.index_path()).ok();
+        remove_dir_if_exists(&self.mailbox_dir(address))?;
+        self.remove_role_markers(address)?;
+        remove_file_if_exists(&self.index_path())?;
+        remove_file_if_exists(&self.role_path(address))?;
         Ok(())
     }
 
-    fn remove_role_markers(&self, role: &str) {
-        let Ok(entries) = fs::read_dir(self.paths.markers_dir()) else {
-            return;
+    fn remove_role_markers(&self, role: &str) -> Result<()> {
+        let entries = match fs::read_dir(self.paths.markers_dir()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err).context("read markers dir"),
         };
         let needle = format!(".{role}.");
-        for entry in entries.flatten() {
-            let path = entry.path();
+        for entry in entries {
+            let path = entry?.path();
             if !path.is_dir() {
                 continue;
             }
-            let Ok(files) = fs::read_dir(&path) else {
-                continue;
-            };
-            for file in files.flatten() {
+            for file in fs::read_dir(&path).context("read marker dir")? {
+                let file = file?;
                 let name = file.file_name().to_string_lossy().to_string();
                 if name.contains(&needle) {
-                    fs::remove_file(file.path()).ok();
+                    remove_file_if_exists(&file.path())?;
                 }
             }
         }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- pending
@@ -857,10 +858,18 @@ impl Store {
             match index.list(role, folder) {
                 Ok(rows) => {
                     let mut entries = Vec::with_capacity(rows.len());
+                    let mut missing = false;
                     for row in rows {
+                        if !self.message_path(role, folder, &row.message_id).exists() {
+                            missing = true;
+                            break;
+                        }
                         entries.push(self.entry_from_index(&index, role, row));
                     }
-                    return Ok(entries);
+                    if !missing {
+                        return Ok(entries);
+                    }
+                    fs::remove_file(self.index_path()).ok();
                 }
                 Err(_) => {
                     fs::remove_file(self.index_path()).ok();
@@ -1254,13 +1263,24 @@ impl Store {
                 Ok(rows) => {
                     let mut seen = std::collections::HashSet::new();
                     let mut out = Vec::new();
+                    let mut missing = false;
                     for row in rows {
                         if !seen.insert(row.message_id.clone()) {
                             continue;
                         }
+                        if !self
+                            .message_path(role, &row.folder, &row.message_id)
+                            .exists()
+                        {
+                            missing = true;
+                            break;
+                        }
                         out.push(self.entry_from_index(&index, role, row));
                     }
-                    return Ok(out);
+                    if !missing {
+                        return Ok(out);
+                    }
+                    fs::remove_file(self.index_path()).ok();
                 }
                 Err(_) => {
                     fs::remove_file(self.index_path()).ok();
@@ -1271,49 +1291,36 @@ impl Store {
     }
 
     fn scan_thread(&self, role: &str, thread_or_message: &str) -> Result<Vec<MailEntry>> {
-        let mut messages: std::collections::BTreeMap<String, (PathBuf, Envelope)> =
+        let mut messages: std::collections::BTreeMap<String, (PathBuf, Envelope, String)> =
             std::collections::BTreeMap::new();
-        let mail_root = self.paths.mail_dir();
-        if let Ok(roles) = fs::read_dir(&mail_root) {
-            for role_entry in roles.flatten() {
-                for folder in ["new", "sent"] {
-                    let dir = role_entry.path().join(folder);
-                    let Ok(entries) = fs::read_dir(&dir) else {
-                        continue;
-                    };
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                            continue;
-                        }
-                        let Ok(envelope) = read_json::<Envelope>(&path) else {
-                            continue;
-                        };
-                        messages
-                            .entry(envelope.message_id.to_string())
-                            .or_insert((path, envelope));
-                    }
+        for folder in ["new", "sent"] {
+            let Ok(entries) = fs::read_dir(self.folder_dir(role, folder)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
                 }
+                let Ok(envelope) = read_json::<Envelope>(&path) else {
+                    continue;
+                };
+                messages
+                    .entry(envelope.message_id.to_string())
+                    .or_insert_with(|| (path, envelope, folder.to_string()));
             }
         }
         let thread_id = messages
             .values()
-            .find(|(_, envelope)| envelope.message_id.to_string() == thread_or_message)
-            .map(|(_, envelope)| envelope.thread_id.to_string())
+            .find(|(_, envelope, _)| envelope.message_id.to_string() == thread_or_message)
+            .map(|(_, envelope, _)| envelope.thread_id.to_string())
             .unwrap_or_else(|| thread_or_message.to_string());
 
         let mut out = Vec::new();
-        for (path, envelope) in messages.values() {
-            if envelope.thread_id.to_string() != thread_id {
-                continue;
+        for (path, envelope, folder) in messages.values() {
+            if envelope.thread_id.to_string() == thread_id {
+                out.push(self.entry_from(role, path, envelope, folder));
             }
-            let message_id = envelope.message_id.to_string();
-            let has_copy = self.message_path(role, "new", &message_id).exists()
-                || self.message_path(role, "sent", &message_id).exists();
-            if !has_copy {
-                continue;
-            }
-            out.push(self.entry_from(role, path, envelope, "thread"));
         }
         out.sort_by(|a, b| {
             a.created_at
@@ -1634,6 +1641,22 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).ok();
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
+    }
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {

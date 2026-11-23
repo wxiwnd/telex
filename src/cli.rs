@@ -1813,6 +1813,17 @@ fn hook_command_path() -> String {
         .unwrap_or_else(|_| "tlx".to_string())
 }
 
+fn read_json_config(file: &Path) -> Result<Value> {
+    match std::fs::read_to_string(file) {
+        Ok(text) if text.trim().is_empty() => Ok(json!({})),
+        Ok(text) => {
+            serde_json::from_str(&text).with_context(|| format!("parse {}", file.display()))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(err) => Err(err).with_context(|| format!("read {}", file.display())),
+    }
+}
+
 fn install_agy_hook(file: &Path, events: &str) -> Result<()> {
     if events != "PreInvocation" {
         bail!("agy uses PreInvocation, not {events}");
@@ -1822,10 +1833,7 @@ fn install_agy_hook(file: &Path, events: &str) -> Result<()> {
         hook_command_path()
     );
     let handler = json!({"type": "command", "command": command, "timeout": 10});
-    let mut doc: Value = std::fs::read_to_string(file)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| json!({}));
+    let mut doc = read_json_config(file)?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1859,10 +1867,7 @@ fn install_hook(harness: &str, file: &Path, events: &str) -> Result<()> {
         bail!("no hook events selected");
     }
     let settings = json!({"hooks": hooks});
-    let mut doc: Value = std::fs::read_to_string(file)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| json!({}));
+    let mut doc = read_json_config(file)?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
