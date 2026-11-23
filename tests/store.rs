@@ -162,6 +162,64 @@ fn binding_is_one_role_one_session_and_reassignment_revokes_old_token() {
 }
 
 #[test]
+fn archived_roles_are_hidden_but_restorable() {
+    let (_dir, store) = store();
+    store.add_role(&addr("worker@local"), None).expect("role");
+    store.archive_role("worker@local").expect("archive");
+
+    assert!(store.get_role("worker@local").expect("get").is_none());
+    assert!(
+        store
+            .get_role_any("worker@local")
+            .expect("get any")
+            .unwrap()
+            .deleted_at
+            .is_some()
+    );
+    assert!(store.list_roles().expect("active").is_empty());
+    assert_eq!(store.list_roles_all().expect("all").len(), 1);
+    assert!(
+        store
+            .add_role(&addr("worker@local"), None)
+            .unwrap_err()
+            .to_string()
+            .contains("archived")
+    );
+
+    store.restore_role("worker@local").expect("restore");
+    assert!(store.get_role("worker@local").expect("get").is_some());
+    assert_eq!(store.list_roles().expect("active").len(), 1);
+}
+
+#[test]
+fn purging_an_archived_role_removes_its_mailbox_and_markers() {
+    let (_dir, store) = store();
+    store.add_role(&addr("worker@local"), None).expect("role");
+    let envelope = envelope("worker@local");
+    let message_id = envelope.message_id.to_string();
+    store
+        .deliver(&envelope, &["worker@local".into()])
+        .expect("deliver");
+    store
+        .mark("worker@local", &message_id, "seen")
+        .expect("mark");
+    store.archive_role("worker@local").expect("archive");
+    store.purge_role("worker@local").expect("purge");
+
+    assert!(store.get_role_any("worker@local").expect("get").is_none());
+    assert!(!store.mailbox_dir("worker@local").exists());
+    assert!(!store.has_marker(&message_id, "seen", "worker@local"));
+    store
+        .add_role(&addr("worker@local"), None)
+        .expect("fresh role");
+    assert!(
+        store
+            .read_message("worker@local", &message_id, false)
+            .is_err()
+    );
+}
+
+#[test]
 fn session_status_distinguishes_unbound_pending_bound_expired_revoked() {
     let (_dir, store) = store();
     store.add_role(&addr("worker@local"), None).expect("role");

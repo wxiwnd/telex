@@ -562,6 +562,148 @@ fn reply_all_keeps_cc_recipients_in_cc() {
 }
 
 #[test]
+fn archived_roles_require_restore_and_purge_removes_them() {
+    let harness = Harness::new();
+    harness.add_role("lead@local");
+    harness.add_role("worker@local");
+    harness.bind("session-lead", "lead@local");
+    harness.bind("session-worker", "worker@local");
+
+    let archived = harness.run(
+        None,
+        &["role", "delete", "worker@local", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(archived.status.success(), "archive: {}", stderr(&archived));
+
+    let add = harness.run(
+        None,
+        &["role", "add", "worker@local", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(!add.status.success());
+    assert!(
+        stderr(&add).contains("archived"),
+        "stderr: {}",
+        stderr(&add)
+    );
+
+    let send = harness.run(
+        Some("session-lead"),
+        &[
+            "send",
+            "--to",
+            "worker@local",
+            "--subject",
+            "gone",
+            "--body",
+            "body",
+        ],
+        None,
+    );
+    assert!(
+        !send.status.success(),
+        "archived role must not receive mail"
+    );
+
+    let all = harness.run(
+        None,
+        &["role", "list", "--all", "--json", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(all.status.success(), "list all: {}", stderr(&all));
+    let roles = json(&all)["roles"].as_array().cloned().unwrap_or_default();
+    let worker = roles
+        .iter()
+        .find(|role| role["address"] == "worker@local")
+        .expect("archived role listed");
+    assert!(worker["deleted_at"].is_string());
+
+    let restored = harness.run(
+        None,
+        &["role", "restore", "worker@local", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(restored.status.success(), "restore: {}", stderr(&restored));
+
+    let updated = harness.run(
+        None,
+        &[
+            "role",
+            "update",
+            "worker@local",
+            "--display",
+            "Worker",
+            "--password-stdin",
+        ],
+        Some(PASSWORD),
+    );
+    assert!(updated.status.success(), "update: {}", stderr(&updated));
+
+    let send = harness.run(
+        Some("session-lead"),
+        &[
+            "send",
+            "--to",
+            "worker@local",
+            "--subject",
+            "back",
+            "--body",
+            "body",
+        ],
+        None,
+    );
+    assert!(
+        send.status.success(),
+        "restored role send: {}",
+        stderr(&send)
+    );
+
+    let archived = harness.run(
+        None,
+        &["role", "delete", "worker@local", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(archived.status.success());
+
+    let purge_without_yes = harness.run(
+        None,
+        &["role", "purge", "worker@local", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(!purge_without_yes.status.success());
+    assert!(stderr(&purge_without_yes).contains("--yes"));
+
+    let purged = harness.run(
+        None,
+        &["role", "purge", "worker@local", "--yes", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(purged.status.success(), "purge: {}", stderr(&purged));
+
+    let all = harness.run(
+        None,
+        &["role", "list", "--all", "--json", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(all.status.success());
+    assert!(
+        json(&all)["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|role| role["address"] != "worker@local")
+    );
+
+    let fresh = harness.run(
+        None,
+        &["role", "add", "worker@local", "--password-stdin"],
+        Some(PASSWORD),
+    );
+    assert!(fresh.status.success(), "fresh role: {}", stderr(&fresh));
+}
+
+#[test]
 fn role_list_does_not_leak_session_ids() {
     let harness = Harness::new();
     let add = harness.run(
