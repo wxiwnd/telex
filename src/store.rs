@@ -54,6 +54,8 @@ pub struct Role {
     #[serde(default)]
     pub bound_at: Option<String>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +268,12 @@ impl Store {
     }
 
     pub fn get_role(&self, address: &str) -> Result<Option<Role>> {
+        Ok(self
+            .get_role_any(address)?
+            .filter(|role| role.deleted_at.is_none()))
+    }
+
+    pub fn get_role_any(&self, address: &str) -> Result<Option<Role>> {
         let path = self.role_path(address);
         if !path.exists() {
             return Ok(None);
@@ -274,6 +282,14 @@ impl Store {
     }
 
     pub fn list_roles(&self) -> Result<Vec<Role>> {
+        Ok(self
+            .list_roles_all()?
+            .into_iter()
+            .filter(|role| role.deleted_at.is_none())
+            .collect())
+    }
+
+    pub fn list_roles_all(&self) -> Result<Vec<Role>> {
         let mut roles = Vec::new();
         for entry in fs::read_dir(self.roles_dir()).context("read seats dir")? {
             let entry = entry?;
@@ -289,7 +305,10 @@ impl Store {
     }
 
     pub fn add_role(&self, address: &Address, display: Option<String>) -> Result<Role> {
-        if self.get_role(address.as_str())?.is_some() {
+        if let Some(role) = self.get_role_any(address.as_str())? {
+            if role.deleted_at.is_some() {
+                bail!("role is archived; use tlx role restore {address}");
+            }
             bail!("role already exists: {address}");
         }
         let role = Role {
@@ -299,6 +318,7 @@ impl Store {
             harness: None,
             bound_at: None,
             created_at: now_rfc3339(),
+            deleted_at: None,
         };
         write_json_atomic(&self.role_path(address.as_str()), &role)?;
         Ok(role)
@@ -306,6 +326,83 @@ impl Store {
 
     pub fn save_role(&self, role: &Role) -> Result<()> {
         write_json_atomic(&self.role_path(&role.address), role)
+    }
+
+    pub fn update_role_display(&self, address: &str, display: Option<String>) -> Result<Role> {
+        let mut role = self
+            .get_role(address)?
+            .ok_or_else(|| anyhow!("role not found: {address}"))?;
+        role.display = display;
+        self.save_role(&role)?;
+        Ok(role)
+    }
+
+    pub fn archive_role(&self, address: &str) -> Result<Role> {
+        let mut role = self
+            .get_role(address)?
+            .ok_or_else(|| anyhow!("role not found: {address}"))?;
+        self.revoke_role_sessions(address)?;
+        self.clear_claims_for(address)?;
+        self.remove_pending_for_role(address)?;
+        self.clear_role_runtime(address);
+        role.session_id = None;
+        role.harness = None;
+        role.bound_at = None;
+        role.deleted_at = Some(now_rfc3339());
+        self.save_role(&role)?;
+        Ok(role)
+    }
+
+    pub fn restore_role(&self, address: &str) -> Result<Role> {
+        let mut role = self
+            .get_role_any(address)?
+            .ok_or_else(|| anyhow!("role not found: {address}"))?;
+        if role.deleted_at.is_none() {
+            bail!("role is not archived: {address}");
+        }
+        role.deleted_at = None;
+        self.save_role(&role)?;
+        Ok(role)
+    }
+
+    pub fn purge_role(&self, address: &str) -> Result<()> {
+        let role = self
+            .get_role_any(address)?
+            .ok_or_else(|| anyhow!("role not found: {address}"))?;
+        if role.deleted_at.is_none() {
+            bail!("archive the role before purging it: {address}");
+        }
+        self.revoke_role_sessions(address)?;
+        self.clear_claims_for(address)?;
+        self.remove_pending_for_role(address)?;
+        self.clear_role_runtime(address);
+        fs::remove_dir_all(self.mailbox_dir(address)).ok();
+        self.remove_role_markers(address);
+        fs::remove_file(self.role_path(address)).ok();
+        fs::remove_file(self.index_path()).ok();
+        Ok(())
+    }
+
+    fn remove_role_markers(&self, role: &str) {
+        let Ok(entries) = fs::read_dir(self.paths.markers_dir()) else {
+            return;
+        };
+        let needle = format!(".{role}.");
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Ok(files) = fs::read_dir(&path) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let name = file.file_name().to_string_lossy().to_string();
+                if name.contains(&needle) {
+                    fs::remove_file(file.path()).ok();
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- pending

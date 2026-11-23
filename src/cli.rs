@@ -108,7 +108,10 @@ struct RoleCmd {
 enum RoleSub {
     Add(RoleAddArgs),
     List(RoleListArgs),
+    Update(RoleUpdateArgs),
     Delete(RoleDeleteArgs),
+    Restore(RoleRestoreArgs),
+    Purge(RolePurgeArgs),
 }
 
 #[derive(Args)]
@@ -124,6 +127,18 @@ struct RoleAddArgs {
 struct RoleListArgs {
     #[arg(long)]
     json: bool,
+    /// Include archived roles. Requires the admin password.
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    password_stdin: bool,
+}
+
+#[derive(Args)]
+struct RoleUpdateArgs {
+    role: String,
+    #[arg(long)]
+    display: Option<String>,
     #[arg(long)]
     password_stdin: bool,
 }
@@ -131,6 +146,23 @@ struct RoleListArgs {
 #[derive(Args)]
 struct RoleDeleteArgs {
     role: String,
+    #[arg(long)]
+    password_stdin: bool,
+}
+
+#[derive(Args)]
+struct RoleRestoreArgs {
+    role: String,
+    #[arg(long)]
+    password_stdin: bool,
+}
+
+#[derive(Args)]
+struct RolePurgeArgs {
+    role: String,
+    /// Permanently delete the role and its mailbox.
+    #[arg(long)]
+    yes: bool,
     #[arg(long)]
     password_stdin: bool,
 }
@@ -647,14 +679,15 @@ fn role(home: &Paths, cmd: RoleCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
         RoleSub::List(args) => {
-            let value = if args.password_stdin {
-                let password = read_password(true)?;
-                rpc_admin(home, "role.list", json!({}), &password)?
-            } else if let Ok(value) = rpc(home, "role.list", json!({})) {
+            let params = json!({"all": args.all});
+            let value = if args.password_stdin || args.all {
+                let password = read_password(args.password_stdin)?;
+                rpc_admin(home, "role.list", params, &password)?
+            } else if let Ok(value) = rpc(home, "role.list", params) {
                 value
             } else {
                 let password = read_password(false)?;
-                rpc_admin(home, "role.list", json!({}), &password)?
+                rpc_admin(home, "role.list", json!({"all": false}), &password)?
             };
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&value)?);
@@ -662,16 +695,49 @@ fn role(home: &Paths, cmd: RoleCmd) -> Result<()> {
                 for role in value["roles"].as_array().cloned().unwrap_or_default() {
                     let address = role["address"].as_str().unwrap_or("");
                     let display = role["display"].as_str().unwrap_or("");
+                    let archived = if role["deleted_at"].is_string() {
+                        "\t[archived]"
+                    } else {
+                        ""
+                    };
                     match role["session_id"].as_str() {
-                        Some(session) => println!("{address}\t{display}\t{session}"),
-                        None => println!("{address}\t{display}"),
+                        Some(session) => {
+                            println!("{address}\t{display}\t{session}{archived}")
+                        }
+                        None => println!("{address}\t{display}{archived}"),
                     }
                 }
             }
         }
+        RoleSub::Update(args) => {
+            let display = args
+                .display
+                .ok_or_else(|| anyhow!("role update requires --display"))?;
+            let password = read_password(args.password_stdin)?;
+            let value = rpc_admin(
+                home,
+                "role.update",
+                json!({"role": args.role, "display": display}),
+                &password,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         RoleSub::Delete(args) => {
             let password = read_password(args.password_stdin)?;
             let value = rpc_admin(home, "role.delete", json!({"role": args.role}), &password)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        RoleSub::Restore(args) => {
+            let password = read_password(args.password_stdin)?;
+            let value = rpc_admin(home, "role.restore", json!({"role": args.role}), &password)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        RoleSub::Purge(args) => {
+            if !args.yes {
+                bail!("refusing to purge without --yes");
+            }
+            let password = read_password(args.password_stdin)?;
+            let value = rpc_admin(home, "role.purge", json!({"role": args.role}), &password)?;
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
     }

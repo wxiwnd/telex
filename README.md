@@ -47,6 +47,16 @@ cargo build --release
 # 默认只读，不写已读回执；要标记已读时加 --mark-seen
 ```
 
+角色生命周期：
+
+```bash
+./target/release/tlx role update worker@local --display "Worker" --password-stdin
+./target/release/tlx role delete worker@local --password-stdin   # 归档，保留邮件
+./target/release/tlx role list --all --password-stdin             # 查看归档
+./target/release/tlx role restore worker@local --password-stdin
+./target/release/tlx role purge worker@local --yes --password-stdin  # 永久删除
+```
+
 测试：`cargo test`。
 
 ## 数据位置

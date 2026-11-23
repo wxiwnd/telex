@@ -88,6 +88,9 @@ fn dispatch(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiEr
         "role.add" => role_add(store, request),
         "role.list" => role_list(store, request),
         "role.delete" => role_delete(store, request),
+        "role.update" => role_update(store, request),
+        "role.restore" => role_restore(store, request),
+        "role.purge" => role_purge(store, request),
         "admin.passwd" => admin_passwd(store, request),
         "whoami" => whoami(store, request),
         "logout" => logout(store, request),
@@ -237,16 +240,7 @@ fn role_add(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiEr
         .and_then(Value::as_str)
         .map(|s| s.to_string());
     if let Some(display) = &display {
-        if display.chars().count() > 64
-            || display
-                .chars()
-                .any(|c| c == '\r' || c == '\n' || c.is_control())
-        {
-            return Err(ApiError::new(
-                "validation",
-                "display must be at most 64 characters without control characters",
-            ));
-        }
+        validate_display(display)?;
     }
     let role = guard(store.add_role(&address, display))?;
     Ok(json!({"role": role}))
@@ -270,7 +264,18 @@ fn role_list(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiE
             "token or admin password required",
         ));
     }
-    let roles = guard(store.list_roles())?;
+    let all = param_bool(&request.params, "all", false);
+    if all && !is_admin {
+        return Err(ApiError::new(
+            "not_logged_in",
+            "admin password required to list archived roles",
+        ));
+    }
+    let roles = if all {
+        guard(store.list_roles_all())?
+    } else {
+        guard(store.list_roles())?
+    };
     let roles: Vec<Value> = roles
         .iter()
         .map(|role| {
@@ -287,16 +292,55 @@ fn role_list(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiE
 fn role_delete(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
     let store = store.lock().unwrap();
     require_admin(&store, request)?;
-    let role = param_str(&request.params, "role")?;
-    let domain = store.config().domain;
-    let role = guard(Address::parse(&role, &domain).map_err(anyhow::Error::from))?.to_string();
-    guard(store.revoke_role_sessions(&role))?;
-    guard(store.clear_claims_for(&role))?;
-    guard(store.remove_pending_for_role(&role))?;
-    store.clear_role_runtime(&role);
-    let path = store.roles_dir().join(format!("{role}.json"));
-    std::fs::remove_file(path).ok();
+    let role = role_param(&store, request)?;
+    let role = guard(store.archive_role(&role))?;
+    Ok(json!({"role": role}))
+}
+
+fn role_update(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
+    let store = store.lock().unwrap();
+    require_admin(&store, request)?;
+    let role = role_param(&store, request)?;
+    let display = param_str(&request.params, "display")?;
+    validate_display(&display)?;
+    let role = guard(store.update_role_display(&role, Some(display)))?;
+    Ok(json!({"role": role}))
+}
+
+fn role_restore(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
+    let store = store.lock().unwrap();
+    require_admin(&store, request)?;
+    let role = role_param(&store, request)?;
+    let role = guard(store.restore_role(&role))?;
+    Ok(json!({"role": role}))
+}
+
+fn role_purge(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
+    let store = store.lock().unwrap();
+    require_admin(&store, request)?;
+    let role = role_param(&store, request)?;
+    guard(store.purge_role(&role))?;
     Ok(json!({"ok": true}))
+}
+
+fn role_param(store: &Store, request: &Request) -> Result<String, ApiError> {
+    let raw = param_str(&request.params, "role")?;
+    let domain = store.config().domain;
+    Ok(guard(Address::parse(&raw, &domain).map_err(anyhow::Error::from))?.to_string())
+}
+
+fn validate_display(display: &str) -> Result<(), ApiError> {
+    if display.chars().count() > 64
+        || display
+            .chars()
+            .any(|c| c == '\r' || c == '\n' || c.is_control())
+    {
+        return Err(ApiError::new(
+            "validation",
+            "display must be at most 64 characters without control characters",
+        ));
+    }
+    Ok(())
 }
 
 fn admin_passwd(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
