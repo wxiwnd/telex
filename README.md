@@ -81,7 +81,7 @@ cargo build --release
 ./target/release/tlx role purge worker@local --yes --password-stdin  # 永久删除
 ```
 
-测试：`cargo test`。CI 在 push/PR 时跑 fmt、clippy 和 Linux/macOS 测试，见 `.github/workflows/ci.yml`。
+测试：`cargo test`。CI 在 push/PR 时跑 fmt、clippy 和 Linux 测试（macOS 本地验证），见 `.github/workflows/ci.yml`。
 
 ## 数据位置
 

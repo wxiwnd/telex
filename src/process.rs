@@ -4,6 +4,7 @@
 //! the same harness process, usually through a shell. Walking the parent chain
 //! lets the login command find the session id written by an earlier hook.
 
+#[cfg(not(target_os = "linux"))]
 use std::process::Command;
 
 pub fn ancestor_pids() -> Vec<u32> {
