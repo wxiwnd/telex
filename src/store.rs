@@ -1352,6 +1352,8 @@ impl Store {
     pub fn doctor(&self) -> Result<Vec<DoctorIssue>> {
         let mut issues = Vec::new();
         let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut spool: std::collections::HashMap<(String, String, String), String> =
+            std::collections::HashMap::new();
         let mut message_count = 0usize;
 
         if let Ok(role_dirs) = fs::read_dir(self.paths.mail_dir()) {
@@ -1360,6 +1362,10 @@ impl Store {
                 if !role_path.is_dir() {
                     continue;
                 }
+                let mailbox = role_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 let tmp = role_path.join("tmp");
                 if let Ok(entries) = fs::read_dir(&tmp) {
                     for entry in entries.flatten() {
@@ -1402,7 +1408,12 @@ impl Store {
                         }
                         match read_json::<Envelope>(&path) {
                             Ok(envelope) => {
-                                known.insert(envelope.message_id.to_string());
+                                let message_id = envelope.message_id.to_string();
+                                spool.insert(
+                                    (mailbox.clone(), folder.to_string(), message_id.clone()),
+                                    envelope.compute_dedupe_key(),
+                                );
+                                known.insert(message_id);
                                 message_count += 1;
                             }
                             Err(_) => issues.push(DoctorIssue {
@@ -1435,17 +1446,29 @@ impl Store {
             }
         } else {
             match MailIndex::open(&index_path) {
-                Ok(index) => match index.counts() {
-                    Ok((indexed, _)) if indexed != message_count => {
-                        issues.push(DoctorIssue {
-                            code: "index_stale".into(),
-                            message: format!(
-                                "index has {indexed} message copies, spool has {message_count}"
-                            ),
-                            path: index_path.display().to_string(),
-                        });
+                Ok(index) => match index.all() {
+                    Ok(rows) => {
+                        let index_count = rows.len();
+                        let mut stale = index_count != spool.len();
+                        if !stale {
+                            for row in rows {
+                                let key = (row.mailbox, row.folder, row.message_id);
+                                if spool.get(&key) != Some(&row.dedupe_key) {
+                                    stale = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if stale {
+                            issues.push(DoctorIssue {
+                                code: "index_stale".into(),
+                                message: format!(
+                                    "index content does not match the spool (index {index_count} copies, spool {message_count})"
+                                ),
+                                path: index_path.display().to_string(),
+                            });
+                        }
                     }
-                    Ok(_) => {}
                     Err(_) => issues.push(DoctorIssue {
                         code: "bad_index".into(),
                         message: "cannot read the SQLite index".into(),

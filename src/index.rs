@@ -2,7 +2,8 @@
 //!
 //! The spool stays authoritative. The index is rebuilt from it and may be
 //! deleted at any time; readers fall back to scanning when it is missing or
-//! unreadable.
+//! unreadable. `dedupe_key` is a content hash of the envelope so `doctor` can
+//! detect index rows that still exist but no longer match the spool.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -15,7 +16,7 @@ use serde::Serialize;
 
 use crate::domain::Envelope;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS mail (
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS mail (
     disposition  TEXT NOT NULL,
     priority     INTEGER NOT NULL,
     expires_at   TEXT,
+    dedupe_key   TEXT NOT NULL,
     PRIMARY KEY (message_id, mailbox, folder)
 );
 CREATE INDEX IF NOT EXISTS mail_by_mailbox
@@ -57,6 +59,7 @@ pub struct IndexedMessage {
     pub disposition: String,
     pub priority: u8,
     pub expires_at: Option<String>,
+    pub dedupe_key: String,
 }
 
 impl IndexedMessage {
@@ -76,6 +79,7 @@ impl IndexedMessage {
             disposition: enum_name(&envelope.disposition),
             priority: envelope.priority,
             expires_at: envelope.expires_at.map(rfc3339),
+            dedupe_key: envelope.compute_dedupe_key(),
         }
     }
 }
@@ -117,8 +121,8 @@ impl MailIndex {
             "INSERT OR REPLACE INTO mail (
                 message_id, mailbox, folder, thread_id, from_addr,
                 to_json, cc_json, bcc_json, subject, created_at,
-                intent, disposition, priority, expires_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                intent, disposition, priority, expires_at, dedupe_key
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 message.message_id,
                 message.mailbox,
@@ -134,6 +138,7 @@ impl MailIndex {
                 message.disposition,
                 message.priority,
                 message.expires_at,
+                message.dedupe_key,
             ],
         )?;
         Ok(())
@@ -143,7 +148,7 @@ impl MailIndex {
         let mut statement = self.conn.prepare(
             "SELECT message_id, mailbox, folder, thread_id, from_addr,
                     to_json, cc_json, bcc_json, subject, created_at,
-                    intent, disposition, priority, expires_at
+                    intent, disposition, priority, expires_at, dedupe_key
              FROM mail
              WHERE mailbox = ?1 AND folder = ?2
              ORDER BY created_at DESC, message_id DESC",
@@ -156,7 +161,7 @@ impl MailIndex {
         let mut statement = self.conn.prepare(
             "SELECT message_id, mailbox, folder, thread_id, from_addr,
                     to_json, cc_json, bcc_json, subject, created_at,
-                    intent, disposition, priority, expires_at
+                    intent, disposition, priority, expires_at, dedupe_key
              FROM mail
              WHERE mailbox = ?1 AND thread_id = ?2
              ORDER BY created_at ASC, message_id ASC",
@@ -184,6 +189,17 @@ impl MailIndex {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    pub fn all(&self) -> Result<Vec<IndexedMessage>> {
+        let mut statement = self.conn.prepare(
+            "SELECT message_id, mailbox, folder, thread_id, from_addr,
+                    to_json, cc_json, bcc_json, subject, created_at,
+                    intent, disposition, priority, expires_at, dedupe_key
+             FROM mail",
+        )?;
+        let rows = statement.query_map([], row_to_message)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn counts(&self) -> Result<(usize, usize)> {
@@ -215,6 +231,7 @@ fn row_to_message(row: &Row<'_>) -> rusqlite::Result<IndexedMessage> {
         disposition: row.get("disposition")?,
         priority: row.get("priority")?,
         expires_at: row.get("expires_at")?,
+        dedupe_key: row.get("dedupe_key")?,
     })
 }
 
