@@ -107,6 +107,8 @@ Telex 本身不提供推送层。需要实时唤醒时，由 harness 插件或�
 
 `tlx inbox-file` 生成收件箱摘要，自动刷新还没做。装完后用 `tlx connect` 查看状态。
 
+邮件 daemon 按需启动，不依赖 systemd/launchd。没有请求时默认空闲 5 分钟后退出并清理 socket；`tlx maild --idle-timeout 0` 可以关闭空闲退出。SIGINT/SIGTERM 会停止接受新连接并清理 socket。
+
 ### 4.8 管理员
 
 管理员能创建和列出角色，批准或指派会话绑定，查看待批申请，修改管理密码。管理员可以用现有角色发信，也可以代读任意角色的收件箱和单封信。代读默认只读，不写角色的 seen marker；只有显式 `--mark-seen` 才代表该角色读信。独立的审计日志和系统通知还没做，见第 10 节。

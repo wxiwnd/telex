@@ -52,7 +52,7 @@ impl Client {
 
         let exe = std::env::current_exe().context("locate tlx binary")?;
         Command::new(exe)
-            .args(["maild", "--foreground"])
+            .args(["maild"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -75,12 +75,25 @@ impl Client {
         token: Option<&str>,
         params: Value,
     ) -> Result<Value, ApiError> {
-        if let Err(err) = self.ensure_daemon() {
-            return Err(ApiError::new("maild_unavailable", err.to_string()));
+        let mut stream = None;
+        for attempt in 0..2 {
+            if let Err(err) = self.ensure_daemon() {
+                return Err(ApiError::new("maild_unavailable", err.to_string()));
+            }
+            match UnixStream::connect(self.socket()) {
+                Ok(connected) => {
+                    stream = Some(connected);
+                    break;
+                }
+                Err(_) if attempt == 0 => continue,
+                Err(err) => {
+                    return Err(ApiError::new("maild_unavailable", err.to_string()));
+                }
+            }
         }
-        let mut stream = UnixStream::connect(self.socket())
-            .map_err(|err| ApiError::new("maild_unavailable", err.to_string()))?;
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        let mut stream =
+            stream.ok_or_else(|| ApiError::new("maild_unavailable", "cannot connect to maild"))?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
         let request = Request {
             id: 1,
             method: method.to_string(),
