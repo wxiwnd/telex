@@ -52,7 +52,7 @@ impl Client {
 
         let exe = std::env::current_exe().context("locate tlx binary")?;
         Command::new(exe)
-            .args(["maild", "--foreground"])
+            .args(["maild"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

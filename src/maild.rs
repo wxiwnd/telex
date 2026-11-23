@@ -4,9 +4,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -16,7 +17,27 @@ use crate::paths::Paths;
 use crate::protocol::{ApiError, PROTOCOL_VERSION, Request, Response};
 use crate::store::{DeliveryReport, Role, Store};
 
-pub fn run(paths: Paths) -> Result<()> {
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn request_shutdown(_: libc::c_int) {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+fn install_signal_handlers() {
+    // SAFETY: the handler only flips an atomic flag.
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            request_shutdown as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            request_shutdown as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+pub fn run(paths: Paths, idle_timeout_secs: u64) -> Result<()> {
     let store = Store::new(paths);
     if !store.config_path().exists() {
         bail!("not initialized: run `tlx init` first");
@@ -34,14 +55,54 @@ pub fn run(paths: Paths) -> Result<()> {
     }
     let listener = UnixListener::bind(&socket_path).context("bind maild socket")?;
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).ok();
+    listener.set_nonblocking(true)?;
+    install_signal_handlers();
 
     let store = Arc::new(Mutex::new(store));
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        let store = Arc::clone(&store);
-        thread::spawn(move || {
-            let _ = handle(store, stream);
-        });
+    let active = Arc::new(AtomicUsize::new(0));
+    let last_activity = Arc::new(Mutex::new(Instant::now()));
+    let idle_timeout = Duration::from_secs(idle_timeout_secs);
+    loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                active.fetch_add(1, Ordering::SeqCst);
+                if let Ok(mut last) = last_activity.lock() {
+                    *last = Instant::now();
+                }
+                let store = Arc::clone(&store);
+                let active = Arc::clone(&active);
+                let last_activity = Arc::clone(&last_activity);
+                thread::spawn(move || {
+                    let _ = handle(store, stream);
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    if let Ok(mut last) = last_activity.lock() {
+                        *last = Instant::now();
+                    }
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) => return Err(err).context("accept maild connection"),
+        }
+        if !idle_timeout.is_zero() && active.load(Ordering::SeqCst) == 0 {
+            let idle = last_activity
+                .lock()
+                .map(|last| last.elapsed() >= idle_timeout)
+                .unwrap_or(false);
+            if idle {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    drop(listener);
+    std::fs::remove_file(&socket_path).ok();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while active.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
     }
     Ok(())
 }

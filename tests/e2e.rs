@@ -23,7 +23,7 @@ impl Harness {
         assert!(init.status.success(), "init: {}", stderr(&init));
 
         let mut child = Command::new(bin());
-        child.args(["maild", "--foreground"]);
+        child.args(["maild"]);
         xdg_env(&mut child, &home);
         let child = child
             .stdout(Stdio::null())
@@ -290,6 +290,95 @@ fn hook_prints_one_line_badge() {
     let text = stdout(&hook);
     assert!(text.starts_with("[Telex]"), "badge: {text}");
     assert!(text.contains("1 封未读"));
+}
+
+#[test]
+fn maild_exits_after_the_idle_timeout() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let init = run(&home, None, &["init", "--password-stdin"], Some(PASSWORD));
+    assert!(init.status.success(), "init: {}", stderr(&init));
+
+    let mut command = Command::new(bin());
+    command.args(["maild", "--idle-timeout", "1"]);
+    xdg_env(&mut command, &home);
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn maild");
+    let socket = home.join("run/telex/maild.sock");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(socket.exists(), "maild socket not ready");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        if let Some(status) = child.try_wait().expect("wait maild") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if exited.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = exited.expect("maild did not exit while idle");
+    assert!(status.success(), "idle maild exit: {status:?}");
+    assert!(!socket.exists(), "idle maild left its socket behind");
+}
+
+#[test]
+fn maild_handles_sigterm_and_removes_its_socket() {
+    let dir = TempDir::new().expect("temp");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let init = run(&home, None, &["init", "--password-stdin"], Some(PASSWORD));
+    assert!(init.status.success(), "init: {}", stderr(&init));
+
+    let mut command = Command::new(bin());
+    command.args(["maild"]);
+    xdg_env(&mut command, &home);
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn maild");
+    let socket = home.join("run/telex/maild.sock");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(socket.exists(), "maild socket not ready");
+
+    let pid = i32::try_from(child.id()).expect("pid");
+    // SAFETY: send a normal termination signal to the child we spawned.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        if let Some(status) = child.try_wait().expect("wait maild") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if exited.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = exited.expect("maild did not stop on SIGTERM");
+    assert!(status.success(), "SIGTERM maild exit: {status:?}");
+    assert!(!socket.exists(), "stopped maild left its socket behind");
 }
 
 #[test]

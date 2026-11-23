@@ -72,7 +72,7 @@ enum Commands {
     Doctor(DoctorArgs),
     /// Index operations.
     Index(IndexCmd),
-    /// Run the local daemon in the foreground.
+    /// Run the local daemon.
     Maild(MaildArgs),
 }
 
@@ -395,8 +395,9 @@ enum IndexSub {
 
 #[derive(Args)]
 struct MaildArgs {
-    #[arg(long)]
-    foreground: bool,
+    /// Exit after this many idle seconds. 0 keeps the daemon alive.
+    #[arg(long, default_value_t = 300)]
+    idle_timeout: u64,
 }
 
 pub fn run() -> Result<()> {
@@ -442,7 +443,7 @@ pub fn run() -> Result<()> {
         Commands::InboxFile(args) => inbox_file(&home, args),
         Commands::Doctor(args) => doctor(&home, args),
         Commands::Index(cmd) => index(&home, cmd),
-        Commands::Maild(_) => crate::maild::run(home),
+        Commands::Maild(args) => crate::maild::run(home, args.idle_timeout),
     }
 }
 
