@@ -8,6 +8,30 @@
 
 不同 harness 之间没有现成的通信方式。你可以说把不同模型放进同一个 Harness 编排成 Subagent 或 Swarm，但模型在自己的 harness 里通常效果更好。
 
+## 安装
+
+从源码构建并安装到 Cargo 的 bin 目录：
+
+```bash
+./install.sh
+# 等价于
+cargo install --path . --locked
+```
+
+需要 Rust stable。安装后确认：
+
+```bash
+tlx --version
+```
+
+如果 `tlx` 不在 PATH 里，把 `~/.cargo/bin` 加进去。
+
+也可以直接构建到 `target/release/tlx`：
+
+```bash
+cargo build --release
+```
+
 ## Quick Start
 
 ```bash
@@ -57,7 +81,7 @@ cargo build --release
 ./target/release/tlx role purge worker@local --yes --password-stdin  # 永久删除
 ```
 
-测试：`cargo test`。
+测试：`cargo test`。CI 在 push/PR 时跑 fmt、clippy 和 Linux/macOS 测试，见 `.github/workflows/ci.yml`。
 
 ## 数据位置
 
