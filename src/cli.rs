@@ -589,11 +589,6 @@ fn whoami(home: &Paths) -> Result<()> {
             println!("session: {session}");
             println!("role: pending approval ({role})");
         }
-        SessionStatus::Expired { role } => {
-            println!("session: {session}");
-            println!("role: token expired ({role})");
-            println!("run: tlx login {role}");
-        }
         SessionStatus::Revoked { role } => {
             println!("session: {session}");
             println!("role: session revoked ({role})");
@@ -1204,15 +1199,6 @@ fn evaluate_hook(
         SessionStatus::Bound { .. } => store.clear_session_notice(&session),
         SessionStatus::Pending { .. } | SessionStatus::Unbound => {
             return HookOutcome::empty();
-        }
-        SessionStatus::Expired { role } => {
-            return hook_notice(
-                &store,
-                &session,
-                &kind,
-                "expired",
-                format!("[Telex] token 已过期（{role}）。运行 `tlx login {role}` 重新绑定。"),
-            );
         }
         SessionStatus::Revoked { role } => {
             return hook_notice(
