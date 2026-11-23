@@ -1229,7 +1229,27 @@ fn evaluate_hook(
     };
     let count = value["count"].as_u64().unwrap_or(0);
     if count == 0 {
+        store.clear_unread_notification(&session);
         return HookOutcome::empty();
+    }
+    if matches!(kind, HookEventKind::UserPromptSubmit) {
+        let ids: Vec<String> = value["ids"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !ids.is_empty() {
+            let has_new = store
+                .record_unread_notification(&session, &ids)
+                .unwrap_or(true);
+            if !has_new {
+                return HookOutcome::empty();
+            }
+        }
     }
     let role = value["role"].as_str().unwrap_or("");
     let line = format!("[Telex] 你有 {count} 封未读（{role}）。查看：`tlx inbox`。");
