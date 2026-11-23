@@ -649,6 +649,72 @@ fn hook_stays_silent_until_binding_is_approved() {
 }
 
 #[test]
+fn hook_notifies_once_when_a_session_is_revoked() {
+    let harness = Harness::new();
+    harness.add_role("worker@local");
+    harness.bind("session-worker", "worker@local");
+
+    let logout = harness.run(Some("session-worker"), &["logout"], None);
+    assert!(logout.status.success(), "logout: {}", stderr(&logout));
+
+    let first = harness.run(
+        None,
+        &["hook", "--event", "UserPromptSubmit", "--harness", "claude"],
+        Some(r#"{"session_id":"session-worker"}"#),
+    );
+    assert!(first.status.success());
+    assert!(
+        stdout(&first).contains("撤销"),
+        "revoked notice: {}",
+        stdout(&first)
+    );
+
+    let second = harness.run(
+        None,
+        &["hook", "--event", "UserPromptSubmit", "--harness", "claude"],
+        Some(r#"{"session_id":"session-worker"}"#),
+    );
+    assert!(second.status.success());
+    assert_eq!(stdout(&second), "", "notice should be one-shot");
+
+    let whoami = harness.run(Some("session-worker"), &["whoami"], None);
+    assert!(whoami.status.success());
+    assert!(stdout(&whoami).contains("session revoked"));
+}
+
+#[test]
+fn hook_notifies_once_when_a_token_is_expired() {
+    let harness = Harness::new();
+    harness.add_role("worker@local");
+    harness.bind("session-worker", "worker@local");
+    let auth = harness.home.join("state/telex/auth/session-worker.json");
+    let mut value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth).expect("auth")).expect("json");
+    value["expires_at"] = serde_json::json!("2000-01-01T00:00:00.000Z");
+    std::fs::write(&auth, serde_json::to_vec(&value).unwrap()).expect("write auth");
+
+    let first = harness.run(
+        None,
+        &["hook", "--event", "UserPromptSubmit", "--harness", "claude"],
+        Some(r#"{"session_id":"session-worker"}"#),
+    );
+    assert!(first.status.success());
+    assert!(
+        stdout(&first).contains("过期"),
+        "expired notice: {}",
+        stdout(&first)
+    );
+
+    let second = harness.run(
+        None,
+        &["hook", "--event", "UserPromptSubmit", "--harness", "claude"],
+        Some(r#"{"session_id":"session-worker"}"#),
+    );
+    assert!(second.status.success());
+    assert_eq!(stdout(&second), "", "notice should be one-shot");
+}
+
+#[test]
 fn hook_event_name_from_payload_wins_over_flag() {
     let harness = Harness::new();
     harness.add_role("lead@local");

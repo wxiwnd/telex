@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use telex::domain::{Address, Envelope, Intent};
 use telex::paths::Paths;
-use telex::store::Store;
+use telex::store::{SessionStatus, Store};
 use tempfile::TempDir;
 
 fn store() -> (TempDir, Store) {
@@ -159,6 +159,83 @@ fn binding_is_one_role_one_session_and_reassignment_revokes_old_token() {
             .is_none()
     );
     assert!(store.role_by_session("session-b").expect("role").is_some());
+}
+
+#[test]
+fn session_status_distinguishes_unbound_pending_bound_expired_revoked() {
+    let (_dir, store) = store();
+    store.add_role(&addr("worker@local"), None).expect("role");
+
+    assert_eq!(
+        store.session_status("session-a").expect("status"),
+        SessionStatus::Unbound
+    );
+
+    let pending = store
+        .create_pending("worker@local", "session-a", "claude")
+        .expect("pending");
+    assert_eq!(
+        store.session_status("session-a").expect("status"),
+        SessionStatus::Pending {
+            role: pending.role.clone()
+        }
+    );
+    store.take_pending(&pending.code).expect("discard pending");
+
+    let auth = store
+        .bind_session("worker@local", "session-a", "claude")
+        .expect("bind");
+    assert_eq!(
+        store.session_status("session-a").expect("status"),
+        SessionStatus::Bound {
+            role: "worker@local".into(),
+            expires_at: auth.expires_at.clone()
+        }
+    );
+
+    let path = store.paths().auth_dir().join("session-a.json");
+    let mut expired = auth.clone();
+    expired.expires_at =
+        (Utc::now() - Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    std::fs::write(&path, serde_json::to_vec(&expired).unwrap()).expect("write auth");
+    assert_eq!(
+        store.session_status("session-a").expect("status"),
+        SessionStatus::Expired {
+            role: "worker@local".into()
+        }
+    );
+
+    store.revoke_session("session-a").expect("revoke");
+    assert_eq!(
+        store.session_status("session-a").expect("status"),
+        SessionStatus::Revoked {
+            role: "worker@local".into()
+        }
+    );
+}
+
+#[test]
+fn an_active_token_is_extended_before_it_expires() {
+    let (_dir, store) = store();
+    store.add_role(&addr("worker@local"), None).expect("role");
+    let mut auth = store
+        .bind_session("worker@local", "session-a", "claude")
+        .expect("bind");
+    auth.expires_at =
+        (Utc::now() + Duration::minutes(30)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    std::fs::write(
+        store.paths().auth_dir().join("session-a.json"),
+        serde_json::to_vec(&auth).unwrap(),
+    )
+    .expect("write auth");
+
+    let renewed = store.renew_token(&auth).expect("renew");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&renewed.expires_at)
+            .unwrap()
+            .with_timezone(&Utc)
+            > Utc::now() + Duration::hours(11)
+    );
 }
 
 #[test]

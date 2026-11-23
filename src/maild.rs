@@ -151,6 +151,7 @@ fn require_auth(store: &Store, request: &Request) -> Result<crate::store::Auth, 
         .verify_token(&session_id, token)
         .map_err(|err| ApiError::new("validation", err.to_string()))?
         .ok_or_else(|| revoked_or_missing(store, &session_id))?;
+    let auth = store.renew_token(&auth).unwrap_or(auth);
     if store
         .get_role(&auth.role)
         .map_err(|err| ApiError::new("validation", err.to_string()))?
@@ -319,7 +320,12 @@ fn admin_passwd(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, A
 fn whoami(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
     let store = store.lock().unwrap();
     let auth = require_auth(&store, request)?;
-    Ok(json!({"role": auth.role, "session_id": auth.session_id, "harness": auth.harness}))
+    Ok(json!({
+        "role": auth.role,
+        "session_id": auth.session_id,
+        "harness": auth.harness,
+        "expires_at": auth.expires_at,
+    }))
 }
 
 fn logout(store: &Arc<Mutex<Store>>, request: &Request) -> Result<Value, ApiError> {
