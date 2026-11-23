@@ -1242,12 +1242,13 @@ fn evaluate_hook(
                     .collect()
             })
             .unwrap_or_default();
-        if !ids.is_empty()
-            && !store
+        if !ids.is_empty() {
+            let has_new = store
                 .record_unread_notification(&session, &ids)
-                .unwrap_or(true)
-        {
-            return HookOutcome::empty();
+                .unwrap_or(true);
+            if !has_new {
+                return HookOutcome::empty();
+            }
         }
     }
     let role = value["role"].as_str().unwrap_or("");

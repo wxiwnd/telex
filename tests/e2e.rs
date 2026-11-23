@@ -657,6 +657,45 @@ fn hook_only_notifies_for_new_unread() {
 }
 
 #[test]
+fn codex_hook_uses_the_same_notification_state() {
+    let harness = Harness::new();
+    harness.add_role("lead@local");
+    harness.add_role("worker@local");
+    harness.bind("session-lead", "lead@local");
+    harness.bind("session-worker", "worker@local");
+    let sent = harness.run(
+        Some("session-lead"),
+        &[
+            "send",
+            "--to",
+            "worker@local",
+            "--subject",
+            "hi",
+            "--body",
+            "there",
+            "--json",
+        ],
+        None,
+    );
+    assert!(sent.status.success(), "send: {}", stderr(&sent));
+
+    let first = harness.run(
+        None,
+        &["hook", "--event", "UserPromptSubmit", "--harness", "codex"],
+        Some(r#"{"session_id":"session-worker"}"#),
+    );
+    assert!(first.status.success());
+    assert!(stdout(&first).contains("1 封未读"));
+    let second = harness.run(
+        None,
+        &["hook", "--event", "UserPromptSubmit", "--harness", "codex"],
+        Some(r#"{"session_id":"session-worker"}"#),
+    );
+    assert!(second.status.success());
+    assert_eq!(stdout(&second), "", "same unread must not repeat");
+}
+
+#[test]
 fn hook_stays_silent_for_unbound_session() {
     let harness = Harness::new();
     for event in ["UserPromptSubmit", "Stop"] {
@@ -1012,6 +1051,7 @@ fn agy_hook_returns_inject_steps() {
         None,
     );
     assert!(sent.status.success(), "send: {}", stderr(&sent));
+    let first_id = json(&sent)["message_id"].as_str().unwrap().to_string();
 
     let out = harness.run(
         None,
@@ -1024,6 +1064,55 @@ fn agy_hook_returns_inject_steps() {
         .as_str()
         .unwrap_or_default();
     assert!(message.contains("封未读"), "message: {message}");
+
+    let repeated = harness.run(
+        None,
+        &["hook", "--event", "PreInvocation", "--harness", "agy"],
+        Some(r#"{"conversationId":"session-worker"}"#),
+    );
+    assert!(repeated.status.success());
+    let value: Value = serde_json::from_str(&stdout(&repeated)).expect("repeated json");
+    assert_eq!(value["injectSteps"], serde_json::json!([]));
+
+    let read = harness.run(Some("session-worker"), &["read", &first_id], None);
+    assert!(read.status.success(), "read: {}", stderr(&read));
+    let after_read = harness.run(
+        None,
+        &["hook", "--event", "PreInvocation", "--harness", "agy"],
+        Some(r#"{"conversationId":"session-worker"}"#),
+    );
+    assert!(after_read.status.success());
+    let value: Value = serde_json::from_str(&stdout(&after_read)).expect("after read json");
+    assert_eq!(value["injectSteps"], serde_json::json!([]));
+
+    let sent = harness.run(
+        Some("session-lead"),
+        &[
+            "send",
+            "--to",
+            "worker@local",
+            "--subject",
+            "again",
+            "--body",
+            "there",
+            "--json",
+        ],
+        None,
+    );
+    assert!(sent.status.success(), "send again: {}", stderr(&sent));
+    let fresh = harness.run(
+        None,
+        &["hook", "--event", "PreInvocation", "--harness", "agy"],
+        Some(r#"{"conversationId":"session-worker"}"#),
+    );
+    assert!(fresh.status.success());
+    let value: Value = serde_json::from_str(&stdout(&fresh)).expect("fresh json");
+    assert!(
+        value["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .is_some_and(|line| line.contains("封未读")),
+        "new agy badge: {value}"
+    );
 
     let unbound = harness.run(
         None,
