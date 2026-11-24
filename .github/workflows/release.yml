@@ -10,26 +10,18 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+  linux:
+    name: linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-musl
             cross: false
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
             cross: true
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            cross: false
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            cross: false
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install musl tools
-        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-musl'
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Install cross
@@ -56,24 +48,48 @@ jobs:
         run: cross build --release --locked --target "${{ matrix.target }}"
 
       - name: Package
-        shell: bash
         run: |
           set -eu
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/tlx" "dist/tlx-${{ matrix.target }}"
-          if [ "${{ matrix.os }}" = "ubuntu-latest" ] && [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
-            strip "dist/tlx-${{ matrix.target }}"
-          fi
+          strip "dist/tlx-${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: tlx-${{ matrix.target }}
           path: dist/tlx-${{ matrix.target }}
 
+  macos:
+    name: macos
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: |
+          set -eu
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/tlx dist/tlx-aarch64-apple-darwin
+          cp target/x86_64-apple-darwin/release/tlx dist/tlx-x86_64-apple-darwin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tlx-macos
+          path: dist/tlx-*
+
   publish:
     name: publish
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
