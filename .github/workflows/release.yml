@@ -52,7 +52,9 @@ jobs:
           set -eu
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/tlx" "dist/tlx-${{ matrix.target }}"
-          strip "dist/tlx-${{ matrix.target }}"
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            strip "dist/tlx-${{ matrix.target }}"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
