@@ -8,56 +8,79 @@
 
 不同 harness 之间没有现成的通信方式。你可以说把不同模型放进同一个 Harness 编排成 Subagent 或 Swarm，但模型在自己的 harness 里通常效果更好。
 
+## 安装
+
+支持 macOS 和 Linux。安装脚本从 GitHub Releases 下载对应平台的二进制：
+
+```bash
+curl -fsSL https://github.com/wxiwnd/telex/releases/latest/download/install.sh | sh
+```
+
+默认装到 `~/.local/bin/tlx`。如果这个目录不在 `PATH` 里，安装脚本会打印提示。
+
+固定版本：
+
+```bash
+curl -fsSL https://github.com/wxiwnd/telex/releases/latest/download/install.sh \
+  | sh -s -- --version 0.1.0
+```
+
+源码开发：
+
+```bash
+cargo install --path . --locked
+# 或
+cargo build --release
+```
+
 ## Quick Start
 
 ```bash
-cargo build --release
-
 # 创建 XDG 目录、管理密码和第一个角色
-./target/release/tlx setup
-./target/release/tlx role add worker@local --password-stdin
+tlx setup
+tlx role add worker@local --password-stdin
 
 # 在 lead agent 所在的 harness 会话里
-./target/release/tlx login lead@local
+tlx login lead@local
 # 记下配对码，在终端运行 tlx approve <配对码> --password-stdin
 
-./target/release/tlx send \
+tlx send \
   --to worker@local --subject "flaky test" --body "Can you look?" --intent question
 
 # 在 worker agent 所在的 harness 会话里
-./target/release/tlx login worker@local
+tlx login worker@local
 # approve 之后 hook 才生效，就能用 inbox 和 read
 ```
 
 接入 harness：
 
 ```bash
-./target/release/tlx connect claude          # Claude Code
-./target/release/tlx connect codex           # Codex，装完在 codex 里跑 /hooks 信任
-./target/release/tlx connect dsh             # DSH
-./target/release/tlx connect agy             # Antigravity CLI
-./target/release/tlx connect                  # 查看接入状态
+tlx connect claude          # Claude Code
+tlx connect codex           # Codex，装完在 codex 里跑 /hooks 信任
+tlx connect dsh             # DSH
+tlx connect agy             # Antigravity CLI
+tlx connect                  # 查看接入状态
 ```
 
 人查看某个角色的收件箱：
 
 ```bash
-./target/release/tlx admin inbox worker@local --password-stdin
-./target/release/tlx admin read worker@local <MESSAGE_ID> --password-stdin
+tlx admin inbox worker@local --password-stdin
+tlx admin read worker@local <MESSAGE_ID> --password-stdin
 # 默认只读，不写已读回执；要标记已读时加 --mark-seen
 ```
 
 角色生命周期：
 
 ```bash
-./target/release/tlx role update worker@local --display "Worker" --password-stdin
-./target/release/tlx role delete worker@local --password-stdin   # 归档，保留邮件
-./target/release/tlx role list --all --password-stdin             # 查看归档
-./target/release/tlx role restore worker@local --password-stdin
-./target/release/tlx role purge worker@local --yes --password-stdin  # 永久删除
+tlx role update worker@local --display "Worker" --password-stdin
+tlx role delete worker@local --password-stdin   # 归档，保留邮件
+tlx role list --all --password-stdin             # 查看归档
+tlx role restore worker@local --password-stdin
+tlx role purge worker@local --yes --password-stdin  # 永久删除
 ```
 
-测试：`cargo test`。
+测试：`cargo test`。CI 在 push/PR 时跑 fmt、clippy 和 Linux 测试；tag `v*` 时构建并发布二进制，见 `.github/workflows/`。
 
 ## 数据位置
 
