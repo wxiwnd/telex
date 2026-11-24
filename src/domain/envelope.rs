@@ -157,12 +157,21 @@ impl Envelope {
         envelope
     }
 
-    /// Content hash: canonical envelope without dedupe_key and sig.
+    /// Content hash used for idempotent delivery. Identity and clock fields
+    /// are excluded so resending the same logical message gets the same key.
     pub fn compute_dedupe_key(&self) -> String {
         let mut value = serde_json::to_value(self).expect("envelope serializes");
         if let Some(object) = value.as_object_mut() {
-            object.remove("dedupe_key");
-            object.remove("sig");
+            for key in [
+                "dedupe_key",
+                "sig",
+                "message_id",
+                "thread_id",
+                "created_at",
+                "hops",
+            ] {
+                object.remove(key);
+            }
         }
         format!("sha256:{}", sha256_hex(canonical_json(&value).as_bytes()))
     }

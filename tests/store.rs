@@ -66,6 +66,24 @@ fn duplicate_delivery_is_idempotent() {
 }
 
 #[test]
+fn same_content_with_a_new_message_id_is_a_duplicate() {
+    let (_dir, store) = store();
+    let first = envelope("worker@local");
+    store
+        .deliver(&first, &["worker@local".into()])
+        .expect("first");
+    let second = envelope("worker@local");
+    assert_ne!(first.message_id, second.message_id);
+    let report = store
+        .deliver(&second, &["worker@local".into()])
+        .expect("second");
+    assert!(report.delivered.is_empty());
+    assert_eq!(report.duplicates, vec!["worker@local".to_string()]);
+    assert_eq!(store.list("worker@local", "new").expect("inbox").len(), 1);
+    assert_eq!(store.list("lead@local", "sent").expect("sent").len(), 1);
+}
+
+#[test]
 fn same_message_id_with_different_content_conflicts() {
     let (_dir, store) = store();
     let envelope = envelope("worker@local");
@@ -257,6 +275,22 @@ fn session_status_distinguishes_unbound_pending_bound_expired_revoked() {
             role: "worker@local".into()
         }
     );
+}
+
+#[test]
+fn thread_fallback_preserves_unread_state() {
+    let (_dir, store) = store();
+    let parent = envelope("worker@local");
+    let id = parent.message_id.to_string();
+    store
+        .deliver(&parent, &["worker@local".into()])
+        .expect("deliver");
+    std::fs::remove_file(store.index_path()).expect("remove index");
+
+    let thread = store.thread("worker@local", &id).expect("thread");
+    assert_eq!(thread.len(), 1);
+    assert!(thread[0].unread);
+    assert!(thread[0].path.contains("/worker@local/new/"));
 }
 
 #[test]
@@ -484,6 +518,26 @@ fn sqlite_index_lists_messages_and_rebuilds() {
     assert_eq!(counts["indexed"], 2);
     assert!(store.index_path().exists());
     assert_eq!(store.list("worker@local", "new").expect("list").len(), 1);
+}
+
+#[test]
+fn missing_spool_file_invalidates_the_index() {
+    let (_dir, store) = store();
+    let envelope = envelope("worker@local");
+    let id = envelope.message_id.to_string();
+    store
+        .deliver(&envelope, &["worker@local".into()])
+        .expect("deliver");
+    std::fs::remove_file(
+        store
+            .mailbox_dir("worker@local")
+            .join("new")
+            .join(format!("{id}.json")),
+    )
+    .expect("remove spool file");
+
+    assert!(store.list("worker@local", "new").expect("list").is_empty());
+    assert!(!store.index_path().exists(), "stale index was removed");
 }
 
 #[test]
