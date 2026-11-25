@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -45,6 +46,25 @@ fn install_signal_handlers() {
             request_shutdown as *const () as libc::sighandler_t,
         );
     }
+}
+
+fn wait_for_connection(listener: &UnixListener, timeout: Duration) -> std::io::Result<bool> {
+    let mut pollfd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: pollfd points to a valid descriptor for the duration of the call.
+    let result = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+    if result < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    Ok(result > 0 && pollfd.revents != 0)
 }
 
 struct ActiveGuard {
@@ -106,23 +126,33 @@ pub fn run(paths: Paths, idle_timeout_secs: u64) -> Result<()> {
     let last_activity = Arc::new(Mutex::new(Instant::now()));
     let idle_timeout = Duration::from_secs(idle_timeout_secs);
     let mut accept_error: Option<std::io::Error> = None;
-    loop {
+    'accept: loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
         }
-        match listener.accept() {
-            Ok((stream, _)) => spawn_connection(
-                stream,
-                Arc::clone(&store),
-                Arc::clone(&active),
-                Arc::clone(&last_activity),
-            ),
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        match wait_for_connection(&listener, Duration::from_millis(100)) {
+            Ok(true) => loop {
+                match listener.accept() {
+                    Ok((stream, _)) => spawn_connection(
+                        stream,
+                        Arc::clone(&store),
+                        Arc::clone(&active),
+                        Arc::clone(&last_activity),
+                    ),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) => {
+                        accept_error = Some(err);
+                        break 'accept;
+                    }
+                }
+            },
+            Ok(false) => {}
             Err(err) => {
                 accept_error = Some(err);
                 break;
             }
         }
+
         if !idle_timeout.is_zero() && active.load(Ordering::SeqCst) == 0 {
             let idle = last_activity
                 .lock()
@@ -148,7 +178,6 @@ pub fn run(paths: Paths, idle_timeout_secs: u64) -> Result<()> {
                 }
             }
         }
-        thread::sleep(Duration::from_millis(100));
     }
 
     drop(listener);
@@ -164,6 +193,9 @@ pub fn run(paths: Paths, idle_timeout_secs: u64) -> Result<()> {
 }
 
 fn handle(store: Arc<Mutex<Store>>, stream: UnixStream) -> Result<()> {
+    // Accepted sockets inherit O_NONBLOCK from the listener on some platforms.
+    // Each request is handled on its own thread, so block here.
+    stream.set_nonblocking(false)?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let mut reader = BufReader::new(stream.try_clone()?).take(16 * 1024 * 1024);
     let mut line = String::new();
