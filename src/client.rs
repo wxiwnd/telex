@@ -27,9 +27,9 @@ impl Client {
         self.paths.socket_path()
     }
 
-    pub fn ensure_daemon(&self) -> Result<()> {
-        if UnixStream::connect(self.socket()).is_ok() {
-            return Ok(());
+    pub fn ensure_daemon(&self) -> Result<UnixStream> {
+        if let Ok(stream) = UnixStream::connect(self.socket()) {
+            return Ok(stream);
         }
         let store = Store::new(self.paths.clone());
         if !store.config_path().exists() {
@@ -46,8 +46,8 @@ impl Client {
             .open(&lock_path)?;
         lock.lock_exclusive().context("lock maild start")?;
 
-        if UnixStream::connect(self.socket()).is_ok() {
-            return Ok(());
+        if let Ok(stream) = UnixStream::connect(self.socket()) {
+            return Ok(stream);
         }
 
         let exe = std::env::current_exe().context("locate tlx binary")?;
@@ -61,8 +61,8 @@ impl Client {
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if UnixStream::connect(self.socket()).is_ok() {
-                return Ok(());
+            if let Ok(stream) = UnixStream::connect(self.socket()) {
+                return Ok(stream);
             }
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -75,24 +75,9 @@ impl Client {
         token: Option<&str>,
         params: Value,
     ) -> Result<Value, ApiError> {
-        let mut stream = None;
-        for attempt in 0..2 {
-            if let Err(err) = self.ensure_daemon() {
-                return Err(ApiError::new("maild_unavailable", err.to_string()));
-            }
-            match UnixStream::connect(self.socket()) {
-                Ok(connected) => {
-                    stream = Some(connected);
-                    break;
-                }
-                Err(_) if attempt == 0 => continue,
-                Err(err) => {
-                    return Err(ApiError::new("maild_unavailable", err.to_string()));
-                }
-            }
-        }
-        let mut stream =
-            stream.ok_or_else(|| ApiError::new("maild_unavailable", "cannot connect to maild"))?;
+        let mut stream = self
+            .ensure_daemon()
+            .map_err(|err| ApiError::new("maild_unavailable", err.to_string()))?;
         let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
         let request = Request {
             id: 1,
